@@ -114,8 +114,32 @@ class SetTable(_Op):
     rows: list[list[str]]
 
 
+class ChartSeries(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    values: list[float]
+
+
+class SetChart(_Op):
+    """Replace a chart-area shape with a real, editable PowerPoint chart (data sits in an
+    embedded workbook, so people can edit it in PowerPoint). Numbers are put here by the
+    compiler from a dataset - never typed by the model."""
+    op: Literal["set_chart"]
+    target: str
+    chart_type: Literal["bar", "column", "stacked_column", "line", "pie", "doughnut"]
+    categories: list[str] = Field(min_length=1, max_length=24)
+    series: list[ChartSeries] = Field(min_length=1, max_length=6)
+    title: str = ""
+    number_format: str = "General"
+    show_values: bool = True
+    palette: list[str] = Field(min_length=1)
+    font: str = "Calibri"
+    text_colour: str = "374151"
+    grid_colour: str = "E5E7EB"
+
+
 Step = Annotated[
-    Union[DuplicateShape, DeleteShape, SetGeometry, SetShapeText, SetTable],
+    Union[DuplicateShape, DeleteShape, SetGeometry, SetShapeText, SetTable, SetChart],
     Field(discriminator="op"),
 ]
 

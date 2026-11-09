@@ -32,7 +32,10 @@ content pack (never invent numbers). Output JSON:
 {"footer": "<short deck footer>", "slides": [{"pattern": "<name>", "fields": {...}, "items": [...],
   "table": {"header": [...], "rows": [[...]]}, "notes": "<optional speaker notes>",
   "sources": ["<fact ids used>"]}]}
-Use "items" only for patterns that list items, "table" only for table patterns. Keep text short:
+Use "items" only for patterns that list items, "table" only for table patterns, and
+"charts": {"<slot>": {"type": "...", "dataset": "<id>", "category": "<column>", "series": ["<column>", ...],
+"title": "...", "number_format": "#,##0"}} only for chart patterns - pick a dataset from the content pack;
+the numbers are taken from it automatically, never write numbers into a chart yourself. Keep text short:
 headings under 6 words, bullet points under 15 words. Never output positions, sizes, colours or fonts.
 Patterns:
 {patterns}"""

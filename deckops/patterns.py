@@ -48,6 +48,51 @@ import math
 from .compiler import CompileError
 
 AUTO_FIELDS = {"page", "footer"}     # filled by the compiler, not the model
+CHART_TYPES = ["bar", "column", "stacked_column", "line", "pie", "doughnut"]
+
+
+def compile_chart(spec: dict, datasets: dict, style: dict, where: str) -> tuple[dict | None, list[str]]:
+    """The model picks WHICH data and WHAT chart; the numbers are copied from the dataset here.
+
+    spec    = {"type": "column", "dataset": "monthly_users", "category": "Month",
+               "series": ["Users"], "title": "...", "number_format": "#,##0", "show_values": true}
+    dataset = {"columns": ["Month", "Users"], "rows": [["Jul", 1200], ...], "source": "..."}
+    """
+    errs = []
+    if spec.get("type") not in CHART_TYPES:
+        return None, [f"{where}: chart type must be one of {CHART_TYPES}"]
+    ds = datasets.get(spec.get("dataset"))
+    if ds is None:
+        return None, [f"{where}: unknown dataset {spec.get('dataset')!r}; available: {sorted(datasets)}"]
+    cols = ds["columns"]
+    cat, series = spec.get("category"), spec.get("series") or []
+    missing = [c for c in [cat, *series] if c not in cols]
+    if missing or not series:
+        return None, [f"{where}: dataset {spec['dataset']!r} has columns {cols}; missing {missing or 'series'}"]
+    ci = cols.index(cat)
+    out_series = []
+    for name in series:
+        si = cols.index(name)
+        vals = [r[si] for r in ds["rows"]]
+        if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in vals):
+            errs.append(f"{where}: column {name!r} is not all numbers")
+        out_series.append({"name": name, "values": vals})
+    if spec["type"] in ("pie", "doughnut"):
+        if len(series) != 1:
+            errs.append(f"{where}: a {spec['type']} chart shows exactly one series")
+        elif any(v < 0 for v in out_series[0]["values"] if isinstance(v, (int, float))):
+            errs.append(f"{where}: a {spec['type']} chart can't show negative values")
+        if len(ds["rows"]) > 8:
+            errs.append(f"{where}: a {spec['type']} chart is unreadable with more than 8 slices")
+    if len(ds["rows"]) > 24:
+        errs.append(f"{where}: too many categories for one chart (max 24)")
+    if errs:
+        return None, errs
+    return {"op": "set_chart", "chart_type": spec["type"], "categories": [str(r[ci]) for r in ds["rows"]],
+            "series": out_series, "title": spec.get("title", ""), "number_format": spec.get("number_format", "General"),
+            "show_values": spec.get("show_values", True), "palette": style.get("palette", ["4F46E5"]),
+            "font": style.get("font", "Calibri"), "text_colour": style.get("text_colour", "374151"),
+            "grid_colour": style.get("grid_colour", "E5E7EB")}, []
 
 
 def load_kit(path: str) -> dict:
@@ -69,7 +114,11 @@ def describe_kit(kit: dict) -> str:
             s += f"; items: {it.get('min', 1)}-{it.get('max', 12)} of {list(it['fields'])}"
         if "table" in p:
             s += f"; table: header + up to {p['table'].get('max_rows', 10)} rows"
+        if "charts" in p:
+            s += f"; charts: {list(p['charts'])} (each: type, dataset, category column, series columns)"
         lines.append(s)
+    lines.append("Chart types: " + ", ".join(CHART_TYPES) + ". Charts take their numbers from a content-pack "
+                 "dataset by id; you choose the dataset, the category column and the value columns.")
     return "\n".join(lines)
 
 
@@ -140,8 +189,9 @@ def layout_items(groups_geom: list[list[dict]], n: int, max_columns: int | None 
 
 # ---- the compiler ---------------------------------------------------------------------------
 
-def compile_from_kit(plan: dict, index: dict, kit: dict) -> list[dict]:
+def compile_from_kit(plan: dict, index: dict, kit: dict, content: dict | None = None) -> list[dict]:
     errors, ops = [], []
+    datasets = (content or {}).get("datasets", {})
     total = len(plan["slides"])
     for n, s in enumerate(plan["slides"], start=1):
         where = f"slide {n} ({s.get('pattern')})"
@@ -222,6 +272,21 @@ def compile_from_kit(plan: dict, index: dict, kit: dict) -> list[dict]:
             else:
                 steps.append({"op": "set_table", "target": f"shape:{tsid}", "header": t["header"], "rows": t["rows"]})
 
+        if "charts" in pat:
+            specs = s.get("charts", {})
+            unknown = set(specs) - set(pat["charts"])
+            if unknown:
+                errors.append(f"{where}: unknown chart slots {sorted(unknown)}; slots: {list(pat['charts'])}")
+            for slot, sid in pat["charts"].items():
+                used.add(sid)
+                if slot not in specs:
+                    steps.append({"op": "delete_shape", "target": f"shape:{sid}"})
+                    continue
+                step, errs = compile_chart(specs[slot], datasets, kit.get("chart_style", {}), f"{where} chart {slot!r}")
+                errors += errs
+                if step:
+                    steps.append({**step, "target": f"shape:{sid}"})
+
         # leak guard: any example text the plan didn't claim is removed
         for sid, shp in shapes.items():
             if sid not in used and _text_of(shp) and shp.get("kind") != "group":
@@ -246,3 +311,21 @@ def example_texts(index: dict, kit: dict) -> set[str]:
                 if len(para["text"].strip()) >= 12:
                     out.add(para["text"].strip())
     return out
+
+
+def _strings(v):
+    if isinstance(v, str):
+        yield v.strip()
+    elif isinstance(v, dict):
+        for x in v.values():
+            yield from _strings(x)
+    elif isinstance(v, list):
+        for x in v:
+            yield from _strings(x)
+
+
+def leaked_text(index: dict, kit: dict, plan: dict, out_index: dict) -> list[str]:
+    """Example-slide text still present in the new deck (text the plan itself supplied doesn't count)."""
+    from .probe import iter_paragraphs
+    out = {p["text"].strip() for p in iter_paragraphs(out_index)}
+    return sorted((example_texts(index, kit) - set(_strings(plan))) & out)

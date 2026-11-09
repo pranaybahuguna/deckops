@@ -29,7 +29,7 @@ LibreOffice (`soffice`), `pdftoppm` (poppler-utils), `unshare` + `prlimit` (util
 | Zip bomb (600 MB unpacked, 600 KB on disk) | rejected before any parser runs |
 | Create a 4-slide deck from a template by role (title/body), no coordinates | valid deck |
 | Edit: 8 process cards → 6 cards in a 3×2 grid, longer text | only that slide's XML changes |
-| Create a 7-slide deck in an example "house style" deck's look (copy example slides, swap content) | valid deck, no example text left, file properties reset |
+| Create a 9-slide deck in an example "house style" deck's look, incl. stacked column, pie and line charts from data | valid deck, real editable charts, no example text left, file properties reset |
 
 The model step is a deterministic stub unless `--llm-config` is given.
 
@@ -77,7 +77,7 @@ the original source.
 ### Op language (current)
 
 `set_paragraph_text` · `set_run_text` · `set_font_size` · `set_geometry` · `delete_shape` · `add_slide` · `delete_slide`
-· `add_slide_from_pattern` (with steps `duplicate_shape`, `delete_shape`, `set_geometry`, `set_shape_text`, `set_table`) · `set_doc_properties`
+· `add_slide_from_pattern` (with steps `duplicate_shape`, `delete_shape`, `set_geometry`, `set_shape_text`, `set_table`, `set_chart`) · `set_doc_properties`
 
 Adding a capability = an op model in `ops.py` + bind/apply in `executor.py` + a compile function.
 
@@ -140,6 +140,39 @@ which shape on it holds which piece of content. Example (abridged):
 4. **Execute** in the sandbox, **validate** (overflow compared to the example slide's own baseline), and
    **scan** the result for any remaining example text.
 
+### Charts: the model chooses, the data decides
+
+The deck may only use data from the **content pack**, which the agent layer gathers before planning:
+
+```json
+{"datasets": {"requests_by_team": {"source": "usage DB",
+   "columns": ["Team", "Requests (k)"],
+   "rows": [["Markets", 410], ["Banking", 260], ["Securities", 180]]}}}
+```
+
+A chart slot on an example slide is just a rectangle marking the chart area. The model's plan says
+*which* data and *what kind* of chart, never the numbers:
+
+```json
+"charts": {"main": {"type": "bar", "dataset": "requests_by_team",
+                    "category": "Team", "series": ["Requests (k)"], "number_format": "#,##0"}}
+```
+
+The compiler copies the numbers from the dataset and checks them: the dataset and columns must
+exist, values must be numbers, a pie/doughnut takes exactly one series, no negatives, at most 8 slices.
+The executor replaces the rectangle with a **real, editable PowerPoint chart** (data in an embedded
+workbook) coloured from the kit's `chart_style.palette`. Types: bar, column, stacked_column, line,
+pie, doughnut.
+
+Tables work the same way (header + rows, styled like the example table). Repeated cards and tiles
+re-flow as a grid.
+
+### Your own colours
+
+`samples/make_style_template.py OUT_DIR brand.json` builds the example template in your colours and font
+(see the docstring for the keys). That's useful to try things out. For production, start from your real
+template and write a kit for it.
+
 ### Writing a kit for your own template
 
 ```
@@ -150,7 +183,8 @@ and page number, and the ids that make up each repeated item, then write the JSO
 `samples/make_style_template.py` builds a complete example (deck + kit) to copy from. Keep a real
 company template and its kit **outside** this repository.
 
-Limits today: example slides holding charts, SmartArt or embedded objects can't be used as patterns.
+Limits today: example slides that already hold charts, SmartArt or embedded objects can't be used as
+patterns (use a plain rectangle as the chart area instead).
 Tables must keep the example's column count. Overlapping shapes are not yet detected (only text overflow).
 
 ## Design decisions found by building it

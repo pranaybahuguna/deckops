@@ -28,7 +28,7 @@ from pptx.oxml.xmlchemy import OxmlElement
 from pptx.opc.constants import RELATIONSHIP_TYPE as RT
 
 from .ops import (AddSlide, AddSlideFromPattern, DeleteShape, DeleteSlide, DuplicateShape, OpList, SetDocProperties,
-                  SetFontSize, SetGeometry, SetParagraphText, SetRunText, SetShapeText, SetTable)
+                  SetChart, SetFontSize, SetGeometry, SetParagraphText, SetRunText, SetShapeText, SetTable)
 from .refs import Ref, RefError, TagError, find_shape_el, para_runs, para_text, para_tokens, parse_tagged, resolve, sha
 
 PHASE = {SetParagraphText: 0, SetRunText: 0, SetFontSize: 1, SetGeometry: 1, DeleteShape: 2, AddSlide: 3,
@@ -219,6 +219,8 @@ def _apply_step(slide, st):
         x.find(qn("a:ext")).set("cx", str(st.w)); x.find(qn("a:ext")).set("cy", str(st.h))
     elif isinstance(st, SetShapeText):
         _fill_paragraphs(el.find(qn("p:txBody")), st.paragraphs)
+    elif isinstance(st, SetChart):
+        _draw_chart(slide, el, st)
     elif isinstance(st, SetTable):
         tbl = el.find(".//" + qn("a:tbl"))
         trs = tbl.findall(qn("a:tr"))
@@ -237,6 +239,80 @@ def _apply_step(slide, st):
             tbl.append(tr)
             height += int(tr.get("h", "0"))
         _xfrm(el).find(qn("a:ext")).set("cy", str(height))
+
+
+def _draw_chart(slide, area_el, st):
+    from pptx.chart.data import CategoryChartData
+    from pptx.dml.color import RGBColor
+    from pptx.enum.chart import XL_CHART_TYPE, XL_LABEL_POSITION, XL_LEGEND_POSITION
+    from pptx.util import Pt
+
+    kinds = {"bar": XL_CHART_TYPE.BAR_CLUSTERED, "column": XL_CHART_TYPE.COLUMN_CLUSTERED,
+             "stacked_column": XL_CHART_TYPE.COLUMN_STACKED, "line": XL_CHART_TYPE.LINE_MARKERS,
+             "pie": XL_CHART_TYPE.PIE, "doughnut": XL_CHART_TYPE.DOUGHNUT}
+    off, ext = _xfrm(area_el).find(qn("a:off")), _xfrm(area_el).find(qn("a:ext"))
+    x, y, w, h = (int(off.get("x")), int(off.get("y")), int(ext.get("cx")), int(ext.get("cy")))
+    area_el.getparent().remove(area_el)                      # the placeholder rectangle goes...
+    data = CategoryChartData(number_format=st.number_format)
+    data.categories = st.categories
+    for s in st.series:
+        data.add_series(s.name, s.values)
+    chart = slide.shapes.add_chart(kinds[st.chart_type], x, y, w, h, data).chart   # ...a real chart takes its place
+    rgb = RGBColor.from_string
+    colours = [rgb(c) for c in st.palette]
+    chart.font.name, chart.font.size = st.font, Pt(11)
+    chart.font.color.rgb = rgb(st.text_colour)
+    round_ = st.chart_type in ("pie", "doughnut")
+    chart.has_title = bool(st.title)
+    if st.title:
+        chart.chart_title.text_frame.text = st.title
+        r = chart.chart_title.text_frame.paragraphs[0].runs[0]
+        r.font.size, r.font.bold, r.font.name = Pt(13), True, st.font
+    chart.has_legend = round_ or len(st.series) > 1
+    if chart.has_legend:
+        chart.legend.position = XL_LEGEND_POSITION.BOTTOM
+        chart.legend.include_in_layout = False
+    plot = chart.plots[0]
+    for i, s in enumerate(plot.series):
+        if round_:                                           # one colour per slice
+            for j, pt in enumerate(s.points):
+                pt.format.fill.solid()
+                pt.format.fill.fore_color.rgb = colours[j % len(colours)]
+        elif st.chart_type == "line":
+            s.format.line.color.rgb = colours[i % len(colours)]
+            s.format.line.width = Pt(2.25)
+            s.smooth = False
+            s.marker.format.fill.solid()
+            s.marker.format.fill.fore_color.rgb = colours[i % len(colours)]
+        else:
+            s.format.fill.solid()
+            s.format.fill.fore_color.rgb = colours[i % len(colours)]
+    if not round_:
+        plot.gap_width = 60
+        va = chart.value_axis
+        va.has_major_gridlines = True
+        va.major_gridlines.format.line.color.rgb = rgb(st.grid_colour)
+        va.format.line.fill.background()
+        va.tick_labels.number_format, va.tick_labels.number_format_is_linked = st.number_format, False
+        chart.category_axis.format.line.color.rgb = rgb(st.grid_colour)
+        if st.chart_type == "bar":                           # horizontal bars: first category at the top
+            chart.category_axis.reverse_order = True
+    if st.show_values:
+        plot.has_data_labels = True
+        dl = plot.data_labels
+        dl.font.size = Pt(10)
+        if round_:
+            dl.show_percentage, dl.show_value, dl.number_format = True, False, "0%"
+            dl.number_format_is_linked = False
+            if st.chart_type == "pie":
+                dl.position = XL_LABEL_POSITION.OUTSIDE_END
+            else:                                            # labels sit on the ring: white reads on every slice
+                dl.font.color.rgb = rgb("FFFFFF")
+                dl.font.bold = True
+        else:
+            dl.number_format, dl.number_format_is_linked = st.number_format, False
+            if st.chart_type != "stacked_column":
+                dl.position = XL_LABEL_POSITION.OUTSIDE_END
 
 
 # ---- apply --------------------------------------------------------------------

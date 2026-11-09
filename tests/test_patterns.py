@@ -11,11 +11,11 @@ sys.path.insert(0, ROOT)
 
 from deckops.compiler import CompileError  # noqa: E402
 from deckops.executor import execute  # noqa: E402
-from deckops.patterns import compile_from_kit, example_texts, layout_items, load_kit  # noqa: E402
+from deckops.patterns import compile_from_kit, layout_items, leaked_text, load_kit  # noqa: E402
 from deckops.probe import iter_paragraphs, probe  # noqa: E402
 
 sys.path.insert(0, os.path.join(ROOT, "examples"))
-from create_from_style_kit import PLAN  # noqa: E402
+from create_from_style_kit import CONTENT, PLAN  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -61,10 +61,30 @@ def test_create_from_kit_end_to_end(kit_dir, tmp_path):
     src = str(kit_dir / "example_style.pptx")
     index = probe(src)
     out = str(tmp_path / "new.pptx")
-    execute(src, compile_from_kit(PLAN, index, kit), out)
+    execute(src, compile_from_kit(PLAN, index, kit, CONTENT), out)
     prs = Presentation(out)
+    charts = [sh.chart for s in prs.slides for sh in s.shapes if getattr(sh, "has_chart", False) and sh.has_chart]
+    assert len(charts) == 3                                           # real, editable charts
+    assert list(charts[0].plots[0].series[0].values) == [210, 260, 330, 360, 390, 410]   # numbers from the data
     assert len(prs.slides) == len(PLAN["slides"])
-    texts = {p["text"].strip() for p in iter_paragraphs(probe(out))}
-    assert not (example_texts(index, kit) & texts)                   # no example text leaked
-    assert "Support assistant" in texts and "4 / 7" in texts         # content + automatic page numbers
+    out_index = probe(out)
+    texts = {p["text"].strip() for p in iter_paragraphs(out_index)}
+    assert leaked_text(index, kit, PLAN, out_index) == []            # no example text leaked
+    assert "Support assistant" in texts and "4 / 9" in texts         # content + automatic page numbers
     assert prs.core_properties.title == "Support assistant"           # file properties reset
+
+
+def test_charts_only_use_real_data(kit_dir):
+    kit = load_kit(str(kit_dir / "example_style_kit.json"))
+    index = probe(str(kit_dir / "example_style.pptx"))
+    base = {"pattern": "chart", "fields": {"title": "t"}}
+    bad = [
+        {"main": {"type": "column", "dataset": "made_up", "category": "Week", "series": ["Automated"]}},   # no such data
+        {"main": {"type": "column", "dataset": "weekly_tickets", "category": "Week", "series": ["Profit"]}},  # no such column
+        {"main": {"type": "pie", "dataset": "weekly_tickets", "category": "Week",
+                  "series": ["Automated", "Handed to a person"]}},                                            # pie: one series
+        {"main": {"type": "radar", "dataset": "topics", "category": "Topic", "series": ["Share"]}},          # unknown type
+    ]
+    for charts in bad:
+        with pytest.raises(CompileError):
+            compile_from_kit({"slides": [{**base, "charts": charts}]}, index, kit, CONTENT)

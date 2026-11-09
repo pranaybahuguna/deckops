@@ -17,6 +17,18 @@ sys.path.insert(0, ROOT)
 from controlplane import orchestrator        # noqa: E402
 from controlplane.planner import StubPlanner  # noqa: E402
 
+# The content pack: what the agent layer gathered. Charts may only use these datasets.
+CONTENT = {
+    "facts": [{"id": "F1", "text": "The pilot covered order and returns questions for one region", "source": "pilot report"}],
+    "datasets": {
+        "weekly_tickets": {"source": "pilot report", "columns": ["Week", "Automated", "Handed to a person"],
+                           "rows": [["W1", 210, 690], ["W2", 260, 640], ["W3", 330, 580], ["W4", 360, 560],
+                                    ["W5", 390, 520], ["W6", 410, 500]]},
+        "topics": {"source": "pilot report", "columns": ["Topic", "Share"],
+                   "rows": [["Order status", 44], ["Returns", 31], ["Delivery", 17], ["Other", 8]]},
+    },
+}
+
 PLAN = {
     "footer": "Support assistant pilot - project update",
     "slides": [
@@ -44,6 +56,19 @@ PLAN = {
                    {"label": "Automated", "value": "38%", "caption": "closed without a person"},
                    {"label": "Escalations", "value": "6%", "caption": "re-opened after hand-off"},
                    {"label": "Rating", "value": "4.5", "caption": "average out of 5"}]},
+        {"pattern": "chart",
+         "fields": {"title": "Automation is rising", "subtitle": "Tickets per week, by who closed them",
+                    "commentary_title": "What it shows",
+                    "commentary": ["Automated answers doubled in six weeks", "Hand-offs to people fell by a quarter"],
+                    "takeaway": "Next: add billing questions."},
+         "charts": {"main": {"type": "stacked_column", "dataset": "weekly_tickets", "category": "Week",
+                             "series": ["Automated", "Handed to a person"], "number_format": "#,##0"}}},
+        {"pattern": "two_charts",
+         "fields": {"title": "What customers ask", "subtitle": "Topics and weekly automation",
+                    "left_caption": "Questions by topic", "right_caption": "Automated tickets per week",
+                    "takeaway": "Order status and returns are three quarters of all questions."},
+         "charts": {"left": {"type": "pie", "dataset": "topics", "category": "Topic", "series": ["Share"]},
+                    "right": {"type": "line", "dataset": "weekly_tickets", "category": "Week", "series": ["Automated"]}}},
         {"pattern": "table",
          "fields": {"title": "Open risks", "subtitle": "What we are watching"},
          "table": {"header": ["Risk", "Mitigation"],
@@ -62,7 +87,7 @@ PLAN = {
 
 def main(kit_path, dst):
     run, man = orchestrator.create_from_kit(os.path.join(ROOT, "out", "workspaces"), kit_path,
-                                            "pilot update deck", {}, StubPlanner(), plan=PLAN)
+                                            "pilot update deck", CONTENT, StubPlanner(), plan=PLAN)
     shutil.copy(run.p("out.pptx"), dst)
     print(json.dumps({k: man[k] for k in ("slides", "ops", "findings", "structural", "leaked_example_text")}, indent=1))
     return run, man
