@@ -27,6 +27,17 @@ title_and_body, two_content, title_only), "blocks" ([{"role":"title|subtitle|bod
 Never output coordinates, sizes, colours or fonts."""
 
 
+KIT_SYSTEM = """You plan a slide deck using ONLY the slide patterns listed below, and ONLY facts from the
+content pack (never invent numbers). Output JSON:
+{"footer": "<short deck footer>", "slides": [{"pattern": "<name>", "fields": {...}, "items": [...],
+  "table": {"header": [...], "rows": [[...]]}, "notes": "<optional speaker notes>",
+  "sources": ["<fact ids used>"]}]}
+Use "items" only for patterns that list items, "table" only for table patterns. Keep text short:
+headings under 6 words, bullet points under 15 words. Never output positions, sizes, colours or fonts.
+Patterns:
+{patterns}"""
+
+
 class StubPlanner:
     name = "stub (offline, deterministic)"
 
@@ -79,6 +90,9 @@ class StubPlanner:
         out = [{"ref": p["ref"], "tagged": self.FR_SHORT[p["text"]]} for p in paragraphs if p["text"] in self.FR_SHORT]
         return {"paragraphs": out}
 
+    def plan_from_kit(self, brief: str, kit_description: str, content: dict) -> dict:
+        raise NotImplementedError("the offline stub has no model: pass a ready-made plan instead")
+
     def plan_create(self, brief: str) -> dict:
         return {"mode": "create", "slides": [
             {"message": "Title", "layout_family": "title", "blocks": [
@@ -129,6 +143,10 @@ class OpenAICompatPlanner:
 
     def plan_create(self, brief):
         return {"mode": "create", **self._chat(CREATE_SYSTEM, brief)}
+
+    def plan_from_kit(self, brief, kit_description, content):
+        user = json.dumps({"request": brief, "content_pack": content}, ensure_ascii=False)
+        return self._chat(KIT_SYSTEM.replace("{patterns}", kit_description), user)
 
     @classmethod
     def from_file(cls, path: str) -> "OpenAICompatPlanner":

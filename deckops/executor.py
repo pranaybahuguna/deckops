@@ -25,10 +25,14 @@ from pptx.oxml import parse_xml
 from pptx.oxml.ns import qn
 from pptx.oxml.xmlchemy import OxmlElement
 
-from .ops import AddSlide, DeleteShape, DeleteSlide, OpList, SetFontSize, SetGeometry, SetParagraphText, SetRunText
-from .refs import Ref, RefError, TagError, para_runs, para_text, para_tokens, parse_tagged, resolve, sha
+from pptx.opc.constants import RELATIONSHIP_TYPE as RT
 
-PHASE = {SetParagraphText: 0, SetRunText: 0, SetFontSize: 1, SetGeometry: 1, DeleteShape: 2, AddSlide: 3, DeleteSlide: 4}
+from .ops import (AddSlide, AddSlideFromPattern, DeleteShape, DeleteSlide, DuplicateShape, OpList, SetDocProperties,
+                  SetFontSize, SetGeometry, SetParagraphText, SetRunText, SetShapeText, SetTable)
+from .refs import Ref, RefError, TagError, find_shape_el, para_runs, para_text, para_tokens, parse_tagged, resolve, sha
+
+PHASE = {SetParagraphText: 0, SetRunText: 0, SetFontSize: 1, SetGeometry: 1, DeleteShape: 2, AddSlide: 3,
+         AddSlideFromPattern: 3, DeleteSlide: 4, SetDocProperties: 5}
 
 
 class ExecError(Exception):
@@ -63,6 +67,23 @@ def _bind(prs, op):
         ref = Ref.parse(op.target)
         resolve(prs, ref)
         return {"sldId": _sldId_el(prs, ref.slide)}
+    if isinstance(op, SetDocProperties):
+        return {}
+    if isinstance(op, AddSlideFromPattern):
+        ref = Ref.parse(op.source)
+        _, _, slide = resolve(prs, ref)
+        _check_cloneable(slide)
+        known = {int(e.get("id")) for e in slide.shapes._spTree.iter(qn("p:cNvPr"))}
+        for k, st in enumerate(op.steps):                     # validate every step before anything runs
+            if isinstance(st, DuplicateShape):
+                if _sid(st.source) not in known:
+                    raise RefError(f"step {k}: no shape {st.source} to duplicate")
+                if st.new_id in known:
+                    raise RefError(f"step {k}: id {st.new_id} already used")
+                known.add(st.new_id)
+            elif _sid(st.target) not in known:
+                raise RefError(f"step {k}: no shape {st.target} on {op.source}")
+        return {"slide": slide}
     if isinstance(op, AddSlide):
         layout = _layout(prs, op.layout)
         after = _sldId_el(prs, Ref.parse(op.after).slide) if op.after else None
@@ -98,6 +119,124 @@ def _layout(prs, layout_id):
         return prs.slide_masters[int(mi)].slide_layouts[int(li)]
     except Exception:
         raise RefError(f"unknown layout {layout_id}")
+
+
+# ---- copying a slide ------------------------------------------------------------
+
+_NO_CLONE = {RT.CHART, RT.DIAGRAM_DATA, RT.DIAGRAM_LAYOUT, RT.DIAGRAM_COLORS, RT.DIAGRAM_QUICK_STYLE,
+             RT.OLE_OBJECT, RT.PACKAGE}
+
+
+def _sid(target: str) -> int:
+    if not target.startswith("shape:"):
+        raise RefError(f"step target must be 'shape:<id>', got {target!r}")
+    return int(target.split(":")[1])
+
+
+def _check_cloneable(slide):
+    for rel in slide.part.rels.values():
+        if rel.reltype in _NO_CLONE:
+            raise RefError(f"slide {slide.slide_id} holds a chart/SmartArt/embedded object; "
+                           "it can't be used as a pattern in this version")
+
+
+def clone_slide(prs, src):
+    """Append a copy of `src`: same layout, shapes, background and image links. Notes are not copied."""
+    new = prs.slides.add_slide(src.slide_layout)
+    tree = new.shapes._spTree
+    for el in list(tree)[2:]:                      # drop placeholders the layout created
+        tree.remove(el)
+    for el in list(src.shapes._spTree)[2:]:        # keep nvGrpSpPr + grpSpPr, copy the rest
+        tree.append(copy.deepcopy(el))
+    bg = src._element.cSld.bg
+    if bg is not None:
+        new._element.cSld.insert(0, copy.deepcopy(bg))
+    remap = {}
+    for rId, rel in src.part.rels.items():
+        if rel.reltype in (RT.NOTES_SLIDE, RT.SLIDE_LAYOUT):
+            continue
+        if rel.is_external:
+            remap[rId] = new.part.relate_to(rel.target_ref, rel.reltype, is_external=True)
+        else:                                      # images etc. are shared, not duplicated
+            remap[rId] = new.part.relate_to(rel.target_part, rel.reltype)
+    attrs = (qn("r:embed"), qn("r:id"), qn("r:link"))
+    for el in new._element.iter():
+        for a in attrs:
+            if el.get(a) in remap:
+                el.set(a, remap[el.get(a)])
+    return new
+
+
+def _xfrm(el):
+    x = el.find(qn("p:xfrm"))                       # graphicFrame (tables)
+    return x if x is not None else el.find(".//" + qn("a:xfrm"))
+
+
+def _fill_paragraphs(txBody, texts):
+    """Replace paragraphs; paragraph k copies the formatting of example paragraph k (or the last one)."""
+    old = txBody.findall(qn("a:p"))
+    for p in old:
+        txBody.remove(p)
+    for k, text in enumerate(texts):
+        p = copy.deepcopy(old[min(k, len(old) - 1)])
+        runs = [c for c in p if c.tag == qn("a:r")]
+        for c in para_tokens(p):
+            p.remove(c)
+        if runs:
+            r = runs[0]
+        else:                                      # empty example paragraph: build a run from endParaRPr
+            r = _new_run("")
+            end = p.find(qn("a:endParaRPr"))
+            if end is not None:
+                rpr = copy.deepcopy(end)
+                rpr.tag = qn("a:rPr")
+                r.insert(0, rpr)
+        r.find(qn("a:t")).text = text
+        end = p.find(qn("a:endParaRPr"))
+        if end is not None:
+            end.addprevious(r)
+        else:
+            p.append(r)
+        txBody.append(p)
+
+
+def _apply_step(slide, st):
+    tree = slide.shapes._spTree
+    if isinstance(st, DuplicateShape):
+        src = find_shape_el(slide, _sid(st.source))
+        dup = copy.deepcopy(src)
+        c = dup.find(".//" + qn("p:cNvPr"))
+        c.set("id", str(st.new_id))
+        c.set("name", f"{c.get('name', 'Shape')} copy {st.new_id}")
+        tree.append(dup)
+        return
+    el = find_shape_el(slide, _sid(st.target))
+    if isinstance(st, DeleteShape):
+        el.getparent().remove(el)
+    elif isinstance(st, SetGeometry):
+        x = _xfrm(el)
+        x.find(qn("a:off")).set("x", str(st.x)); x.find(qn("a:off")).set("y", str(st.y))
+        x.find(qn("a:ext")).set("cx", str(st.w)); x.find(qn("a:ext")).set("cy", str(st.h))
+    elif isinstance(st, SetShapeText):
+        _fill_paragraphs(el.find(qn("p:txBody")), st.paragraphs)
+    elif isinstance(st, SetTable):
+        tbl = el.find(".//" + qn("a:tbl"))
+        trs = tbl.findall(qn("a:tr"))
+        ncols = len(trs[0].findall(qn("a:tc")))
+        if len(st.header) != ncols or any(len(r) != ncols for r in st.rows):
+            raise RefError(f"table needs exactly {ncols} columns")
+        head_tpl, body_tpls = trs[0], (trs[1:3] or trs[:1])
+        for tr in trs:
+            tbl.remove(tr)
+        new_rows = [(head_tpl, st.header)] + [(body_tpls[i % len(body_tpls)], r) for i, r in enumerate(st.rows)]
+        height = 0
+        for tpl, cells in new_rows:
+            tr = copy.deepcopy(tpl)
+            for tc, text in zip(tr.findall(qn("a:tc")), cells):
+                _fill_paragraphs(tc.find(qn("a:txBody")), [text])
+            tbl.append(tr)
+            height += int(tr.get("h", "0"))
+        _xfrm(el).find(qn("a:ext")).set("cy", str(height))
 
 
 # ---- apply --------------------------------------------------------------------
@@ -164,6 +303,19 @@ def _apply(prs, op, b, warnings):
         el = b["sldId"]
         prs.part.drop_rel(el.get(qn("r:id")))
         el.getparent().remove(el)
+    elif isinstance(op, SetDocProperties):
+        import datetime
+        cp = prs.core_properties
+        cp.title, cp.author, cp.last_modified_by = op.title, op.author, op.author
+        cp.subject = cp.keywords = cp.comments = cp.category = cp.content_status = ""
+        cp.revision = 1
+        cp.created = cp.modified = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0, tzinfo=None)
+    elif isinstance(op, AddSlideFromPattern):
+        new = clone_slide(prs, b["slide"])
+        for st in op.steps:
+            _apply_step(new, st)
+        if op.notes:
+            new.notes_slide.notes_text_frame.text = op.notes
     elif isinstance(op, AddSlide):
         slide = prs.slides.add_slide(b["layout"])
         for ph in list(slide.placeholders):

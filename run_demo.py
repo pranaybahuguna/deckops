@@ -7,6 +7,7 @@
 5. zip bomb is rejected before any parser runs
 6. create a 4-slide deck from the template
 7. edit: 8 process cards -> 6, re-laid out as a 3x2 grid
+8. create a new deck in the look of an example "house style" deck (copy example slides, swap content)
 
     python3 run_demo.py                          # offline stub planner
     python3 run_demo.py --llm-config llm.json    # real model; llm.json is git-ignored:
@@ -95,6 +96,14 @@ def main():
     eman = edit_card_grid.main(os.path.join(OUT, "sample.pptx"), os.path.join(OUT, "sample_edited.pptx"))
     results["edit_only_slide7_changed"] = eman["exec"]["parts"]["changed"] == ["ppt/slides/slide7.xml"]
     results["edit_new_problems"] = len(eman["structural"]) + len(eman["findings"])
+
+    hr("8. create a new deck in an example house style")
+    subprocess.run([sys.executable, os.path.join(ROOT, "samples/make_style_template.py"), OUT], check=True)
+    import create_from_style_kit
+    krun, kman = create_from_style_kit.main(os.path.join(OUT, "example_style_kit.json"), os.path.join(OUT, "styled_deck.pptx"))
+    results["styled_create_slides"] = kman["slides"]
+    results["styled_create_problems"] = len(kman["structural"]) + len(kman["findings"])
+    results["styled_create_leaked_text"] = len(kman["leaked_example_text"])
 
     hr("summary")
     for k, v in results.items():

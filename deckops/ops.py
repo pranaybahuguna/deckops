@@ -87,8 +87,57 @@ class SetGeometry(_Op):
     h: int = Field(ge=0)
 
 
+# ---- create-from-pattern: copy an example slide, then edit the copy -----------------
+# Steps inside AddSlideFromPattern address shapes on the NEW slide by id: "shape:<id>".
+
+class SetShapeText(_Op):
+    """Replace all text in a shape with these paragraphs. Each new paragraph copies the
+    formatting (bullets, font, colour) of the example paragraph in the same position."""
+    op: Literal["set_shape_text"]
+    target: str
+    paragraphs: list[str] = Field(min_length=1)
+
+
+class DuplicateShape(_Op):
+    """Copy a shape (all formatting) under a new id, so a pattern can have more items."""
+    op: Literal["duplicate_shape"]
+    source: str
+    new_id: int = Field(gt=0)
+
+
+class SetTable(_Op):
+    """Rewrite a table: header row styled like the example header, body rows like the
+    example body rows (alternating, so banding survives). Column count must match."""
+    op: Literal["set_table"]
+    target: str
+    header: list[str]
+    rows: list[list[str]]
+
+
+Step = Annotated[
+    Union[DuplicateShape, DeleteShape, SetGeometry, SetShapeText, SetTable],
+    Field(discriminator="op"),
+]
+
+
+class AddSlideFromPattern(_Op):
+    op: Literal["add_slide_from_pattern"]
+    source: str                 # the example slide to copy, e.g. "slide:258"
+    steps: list[Step] = []
+    notes: str | None = None
+
+
+class SetDocProperties(_Op):
+    """File > Properties. Always reset when a deck is built from someone else's file,
+    so the old title/author/comments don't travel with the new deck."""
+    op: Literal["set_doc_properties"]
+    title: str = ""
+    author: str = ""
+
+
 Op = Annotated[
-    Union[SetParagraphText, SetRunText, SetFontSize, AddSlide, DeleteSlide, DeleteShape, SetGeometry],
+    Union[SetParagraphText, SetRunText, SetFontSize, AddSlide, DeleteSlide, DeleteShape, SetGeometry,
+          AddSlideFromPattern, SetDocProperties],
     Field(discriminator="op"),
 ]
 OpList = TypeAdapter(list[Op])

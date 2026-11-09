@@ -168,3 +168,48 @@ def edit(root, src_path, plan, compile_fn, slide_numbers, planner_name, log=prin
                 "changelog": _changelog(index, ops), "trace": run.trace}
     run.save("manifest.json", manifest)
     return run, manifest
+
+
+def create_from_kit(root, kit_path, brief, content, planner, log=print, plan=None):
+    """Create a new deck in the look of an example deck (see deckops/patterns.py).
+
+    content: the "content pack" - facts the deck may use, gathered by the agent layer.
+    plan:    optional ready-made plan (skips the model; used for tests and hand-written decks).
+    """
+    from deckops.patterns import compile_from_kit, describe_kit, example_texts, load_kit
+    kit = load_kit(kit_path)
+    run = Run(root, planner, log)
+    log(f"run {run.id}  create from style kit '{kit.get('name', '?')}'")
+    tpl = os.path.join(os.path.dirname(os.path.abspath(kit_path)), kit["template"])
+    shutil.copy(tpl, run.p("source.pptx"))                                      # 0 intake
+    _, index = run.box("probe", "source.pptx", "index.json")                     # 1 survey the example deck
+    log(f"  probe: {len(index['slides'])} example slides, {len(kit['patterns'])} patterns in kit")
+    if plan is None:                                                             # 2 plan (the model)
+        plan = planner.plan_from_kit(brief, describe_kit(kit), content)
+    run.save("plan.json", plan)
+    ops = compile_from_kit(plan, index, kit)                                     # 3 work orders (pure)
+    log(f"  compile: {len(plan['slides'])} slides -> {len(ops)} ops "
+        f"({sum(len(o.get('steps', [])) for o in ops)} steps on copied slides)")
+    run.save("ops.json", ops)
+    rc, ex = run.box("execute", "source.pptx", "ops.json", "out.pptx", "exec.json")   # 4 build
+    if rc == 3:
+        raise RuntimeError(f"execution refused: {ex['errors']}")
+    # baseline: how tight the example slides already were, so we only flag what our text made worse
+    ex_slides = sorted({p["slide"] - 1 for p in kit["patterns"].values()})
+    _, base = run.box("validate", "source.pptx", ",".join(map(str, ex_slides)), "-", "baseline.json")
+    base_ratio = {(f["slide_index"], f["ref"].rsplit("shape:", 1)[1]): f["ratio"] for f in base["findings"]}
+    _, val = run.box("validate", "out.pptx", "all", "render0", "validate.json")  # 5 check
+    val["findings"] = [f for f in val["findings"]
+                       if f["ratio"] > 1.03 * max(1.0, base_ratio.get(
+                           (kit["patterns"][plan["slides"][f["slide_index"]]["pattern"]]["slide"] - 1,
+                            f["ref"].rsplit("shape:", 1)[1]), 0))]
+    _, out_index = run.box("probe", "out.pptx", "out_index.json")
+    leaked = sorted(example_texts(index, kit) & {p["text"].strip() for p in iter_paragraphs(out_index)})
+    log(f"  validate: {len(val['findings'])} overflow, structural={val['structural'] or 'ok'}, "
+        f"example text leaked: {len(leaked)}")
+    manifest = {"run": run.id, "mode": "create_from_kit", "kit": kit.get("name"), "planner": planner.name,
+                "slides": len(plan["slides"]), "ops": len(ops), "exec": ex, "findings": val["findings"],
+                "structural": val["structural"], "leaked_example_text": leaked,
+                "previews": val.get("previews"), "trace": run.trace}
+    run.save("manifest.json", manifest)
+    return run, manifest
