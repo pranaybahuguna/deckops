@@ -138,6 +138,10 @@ def predict_overflow(prs, slide, shape, major, minor):
         n = _wrap_lines(text, font, width) if text else 1
         total += n * size * (0.9 if is_title else 1.2) + (0.2 * size if is_body else 0)
     over = total - height
+    if height <= 0:                      # a box squeezed to nothing can't hold any text
+        return {"needed_pt": round(total, 1), "available_pt": round(height, 1), "ratio": 99,
+                "overflow": bool(total), "max_font_pt": round(max_size, 1), "masked_by_autofit": autofit,
+                "suggest_size_pt": None}
     return {"needed_pt": round(total, 1), "available_pt": round(height, 1),
             "ratio": round(total / height, 3) if height else 99,
             "overflow": over > 0.02 * height, "max_font_pt": round(max_size, 1),

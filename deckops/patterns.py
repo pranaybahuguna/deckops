@@ -235,6 +235,20 @@ def layout_items(groups_geom: list[list[dict]], n: int, max_columns: int | None 
     return out
 
 
+def _spill(groups_geom, placed, tol=45720):
+    """Do the laid-out items leave the area the example's items occupied? (0.05in tolerance)"""
+    if not placed:
+        return None
+    x0, y0, w, h = _bbox([{"x": b[0], "y": b[1], "w": b[2], "h": b[3]} for b in map(_bbox, groups_geom)])
+    bottom = max(g["y"] + g["h"] for _, gs in placed for g in gs)
+    right = max(g["x"] + g["w"] for _, gs in placed for g in gs)
+    if bottom > y0 + h + tol:
+        return f"they would run {(bottom - y0 - h) / 914400:.2f} in below their area"
+    if right > x0 + w + tol:
+        return f"they would run {(right - x0 - w) / 914400:.2f} in past their area"
+    return None
+
+
 # ---- the compiler ---------------------------------------------------------------------------
 
 def compile_from_kit(plan: dict, index: dict, kit: dict, content: dict | None = None) -> list[dict]:
@@ -281,6 +295,10 @@ def compile_from_kit(plan: dict, index: dict, kit: dict, content: dict | None = 
             next_id = max(shapes) + 1
             dup_steps, del_steps, geo_steps, text_steps = [], [], [], []
             placed = layout_items(geoms, len(items), it.get("max_columns")) if items else []
+            spill = _spill(geoms, placed)
+            if spill:
+                errors.append(f"{where}: {len(items)} items don't fit this layout ({spill}); "
+                              f"use fewer items or split them over two slides")
             for i, (k, new_geoms) in enumerate(placed):
                 if i < len(groups):
                     ids = groups[i]

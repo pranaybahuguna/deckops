@@ -41,6 +41,26 @@ Patterns:
 {patterns}"""
 
 
+OUTLINE_SYSTEM = """You write the CONTENT of a slide deck, slide by slide, using ONLY facts from the content
+pack. Do not think about layout or design. Output JSON:
+{"title": "<deck title>", "footer": "<short footer>", "slides": [
+  {"purpose": "<why this slide exists>", "kind": "<cover|numbers|sequence|comparison|list|table|chart|text|closing>",
+   "title": "<headline, under 8 words>", "subtitle": "<optional>", "intro": "<optional sentence>",
+   "points": [{"heading": "<under 5 words>", "text": "<under 20 words>", "value": "<optional short figure, e.g. 38%>",
+               "fact": "<fact id>"}],
+   "table": {"header": [...], "rows": [[...]]}, "chart": {"type": "...", "dataset": "<id>", "category": "<col>", "series": ["<col>"]},
+   "takeaway": "<optional one line>", "sources": ["<fact ids>"]}]}
+At most {max_points} points on a slide; if there are more, use more slides. A "value" must appear in the fact it
+cites. First slide is the cover, last slide the closing."""
+
+RENDER_SYSTEM = """You place the content of ONE slide into ONE of the layouts offered. Pick the layout that suits
+the content best, then fill its fields with the content. You may shorten wording to fit; never add facts or
+numbers. Output JSON: {"pattern": "<layout name>", "fields": {"<field>": "<text>"}, "items": [{"<field>": "<text>"}],
+"table": {"header": [...], "rows": [[...]]}, "charts": {"<slot>": {...}}}. Use only the field names listed for the
+layout you pick, and an item count within its min and max. Leave out what the layout doesn't have.
+If "feedback" is given, your previous answer was rejected: fix exactly what it says."""
+
+
 class StubPlanner:
     name = "stub (offline, deterministic)"
 
@@ -96,6 +116,77 @@ class StubPlanner:
     def plan_from_kit(self, brief: str, kit_description: str, content: dict) -> dict:
         raise NotImplementedError("the offline stub has no model: pass a ready-made plan instead")
 
+    def outline(self, brief, content, max_points):
+        raise NotImplementedError("the offline stub can't write content: pass --outline outline.json")
+
+    # Offline stage 2: a plain rule-based renderer. Picks the first layout offered (they arrive sorted
+    # by fit) and copies content into same-named fields. On feedback it shortens text or drops items.
+    ITEM_SOURCES = {"heading": ("heading",), "label": ("heading", "label"), "value": ("value",),
+                    "body": ("text",), "points": ("text",), "caption": ("text",), "text": ("text",),
+                    "detail_1": ("text",)}
+    FIELD_SOURCES = {"title": "title", "subtitle": "subtitle", "intro": "intro", "takeaway": "takeaway",
+                     "note": "note", "heading": "heading"}
+
+    def render_slide(self, slide, options, context, feedback=None, previous=None):
+        if previous is not None and feedback:
+            return self._fix(previous, feedback)
+        o = options[0]
+        out = {"pattern": o["pattern"], "fields": {}}
+        for f in o["fields"]:
+            src = self.FIELD_SOURCES.get(f)
+            if src and slide.get(src):
+                out["fields"][f] = slide[src]
+        pts = slide.get("points") or []
+        if "items" in o:
+            out["items"] = []
+            for p in pts:
+                item = {}
+                for f in o["items"]["each"]:
+                    for src in self.ITEM_SOURCES.get(f, ()):
+                        if p.get(src) and not (f == "label" and src == "label" and "label" in item):
+                            item[f] = p[src]
+                            break
+                out["items"].append(item)
+        else:                                     # text layout: points go into the long-text fields
+            longs = [f for f in o["fields"] if f.split("_")[0] in ("body", "points", "text", "side")]
+            for f, p in zip(longs, pts):
+                out["fields"][f] = (p.get("heading", "") + ": " if p.get("heading") else "") + p.get("text", "")
+        if slide.get("table") and "table" in o:
+            out["table"] = slide["table"]
+        if slide.get("chart") and o.get("charts"):
+            out["charts"] = {o["charts"][0]: slide["chart"]}
+        return out
+
+    @staticmethod
+    def _fix(previous, feedback):
+        import re
+        fixed = json.loads(json.dumps(previous))
+        for msg in feedback:
+            m = re.search(r"needs (\d+)-(\d+) items, got (\d+)", msg)
+            if m and fixed.get("items"):
+                fixed["items"] = fixed["items"][:int(m.group(2))]
+            m = re.search(r"unknown fields \[(.*?)\]", msg)
+            if m:
+                for f in re.findall(r"'([^']+)'", m.group(1)):
+                    fixed.get("fields", {}).pop(f, None)
+                    for it in fixed.get("items", []):
+                        it.pop(f, None)
+            m = re.search(r'too long for its box: "(.*)"; rewrite it in at most (\d+) characters', msg)
+            if m:
+                old, limit = m.group(1), int(m.group(2))
+                def shorten(v):                   # offline: keep whole words up to the limit
+                    if isinstance(v, str) and v.startswith(old[:40]) and len(v) > limit:
+                        out = ""
+                        for w in v.split():
+                            if len(out) + len(w) + 1 > limit:
+                                break
+                            out = f"{out} {w}".strip()
+                        return out or v[:limit]
+                    return v
+                fixed["fields"] = {k: shorten(v) for k, v in fixed.get("fields", {}).items()}
+                fixed["items"] = [{k: shorten(v) for k, v in it.items()} for it in fixed.get("items", [])]
+        return fixed
+
     def plan_create(self, brief: str) -> dict:
         return {"mode": "create", "slides": [
             {"message": "Title", "layout_family": "title", "blocks": [
@@ -150,6 +241,17 @@ class OpenAICompatPlanner:
     def plan_from_kit(self, brief, kit_description, content):
         user = json.dumps({"request": brief, "content_pack": content}, ensure_ascii=False)
         return self._chat(KIT_SYSTEM.replace("{patterns}", kit_description), user)
+
+    # ---- two-stage generation (controlplane/slide_flow.py) --------------------------------
+    def outline(self, brief, content, max_points):
+        user = json.dumps({"request": brief, "content_pack": content}, ensure_ascii=False)
+        return self._chat(OUTLINE_SYSTEM.replace("{max_points}", str(max_points)), user)
+
+    def render_slide(self, slide, options, context, feedback=None, previous=None):
+        msg = {"deck": context, "slide_content": slide, "layouts": options}
+        if feedback:
+            msg["previous_answer"], msg["feedback"] = previous, feedback
+        return self._chat(RENDER_SYSTEM, json.dumps(msg, ensure_ascii=False))
 
     # ---- vision: called from the CONTROL PLANE with PNGs the sandbox rendered ------------
     # The sandbox never talks to a model. These methods only ever receive picture bytes and JSON.

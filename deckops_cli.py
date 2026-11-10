@@ -4,8 +4,9 @@
     python3 deckops_cli.py kit my_template.pptx my_kit.json                  # rules only
     python3 deckops_cli.py kit my_template.pptx my_kit.json --llm llm.json   # rules + vision model
 
-    # 2. create a new deck in that template's look
+    # 2. create a new deck in that template's look (two stages: content, then a layout per slide)
     python3 deckops_cli.py create my_kit.json content.json "brief for the deck" new_deck.pptx --llm llm.json
+    python3 deckops_cli.py create my_kit.json content.json "brief" new.pptx --outline outline.json  # no model
     python3 deckops_cli.py create my_kit.json content.json "brief" new_deck.pptx --plan plan.json   # no model
 
     # 3. translate slides of an existing deck
@@ -50,11 +51,14 @@ def cmd_kit(args):
 def cmd_create(args):
     content = json.load(open(args.content))
     plan = json.load(open(args.plan)) if args.plan else None
-    if plan is None and not args.llm:
-        sys.exit("create needs --llm llm.json (a model writes the plan) or --plan plan.json")
-    run, man = orchestrator.create_from_kit(args.runs, args.kit, args.brief, content, planner(args), plan=plan)
+    outline = json.load(open(args.outline)) if args.outline else None
+    if plan is None and outline is None and not args.llm:
+        sys.exit("create needs --llm llm.json, or --outline outline.json (stage 2 offline), or --plan plan.json")
+    run, man = orchestrator.create_from_kit(args.runs, args.kit, args.brief, content, planner(args),
+                                            plan=plan, outline=outline, two_stage=not args.single_call)
     shutil.copy(run.p("out.pptx"), args.out)
-    print(json.dumps({k: man.get(k) for k in ("slides", "findings", "structural", "leaked_example_text")}, indent=1))
+    print(json.dumps({k: man.get(k) for k in ("slides", "findings", "structural", "leaked_example_text", "repairs")},
+                     indent=1))
     print(f"\ndeck: {args.out}   previews: {run.p('render1')}")
 
 
@@ -84,6 +88,8 @@ def main():
     c.add_argument("out")
     c.add_argument("--llm")
     c.add_argument("--plan", help="use this plan instead of asking a model")
+    c.add_argument("--outline", help="use this stage-1 content; stage 2 (layout per slide) still runs")
+    c.add_argument("--single-call", action="store_true", help="old mode: one model call plans the whole deck")
     c.set_defaults(fn=cmd_create)
 
     t = sub.add_parser("translate", help="translate slides of a deck")

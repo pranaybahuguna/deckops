@@ -219,7 +219,20 @@ opens the .pptx itself; it only reads this JSON.
 
 ### Step 3: plan (the model, the only AI step)
 
-**Code:** `planner.plan_from_kit(brief, describe_kit(kit), content_pack)`.
+**Now done in two stages** (`controlplane/slide_flow.py`, `create_from_kit(two_stage=True)`):
+1. `planner.outline(brief, content, max_points)` → `outline.json`: per slide its purpose, kind
+   (numbers, sequence, comparison, list, table, chart, text), title, points with the fact each comes
+   from. No layout.
+2. For each slide, `options_for()` lists the layouts that can hold it (measured item limits, table/chart
+   match, cover first, closing last); `planner.render_slide(content, options, context)` picks one and
+   fills it. Run in parallel.
+3. Each answer is compiled alone; a `CompileError` goes back with the previous answer (`feedback`), up to
+   2 retries. After building, overflow findings go back as "rewrite it in at most N characters", where
+   N comes from the lines the box holds, and only those slides are redone (`repairs.json`).
+
+The original one-call planning below is still available (`--single-call`).
+
+**Code (one call):** `planner.plan_from_kit(brief, describe_kit(kit), content_pack)`.
 
 **Input to the model:**
 - A system prompt (`KIT_SYSTEM` in `planner.py`): use only these patterns, use only facts from
@@ -530,18 +543,20 @@ The command-line + JSON contract stays the same.
 | `deckops/validate.py` | sandbox | 190 | Structure, overflow prediction, rendering |
 | `deckops/autokit.py` | sandbox | 390 | Draft a style kit from a template with rules |
 | `controlplane/kit_check.py` | control | 200 | Acceptance test for a kit; drops failing patterns |
+| `controlplane/slide_flow.py` | control | 170 | Two-stage generation: options per slide, split, per-slide retry |
 | `controlplane/kit_merge.py` | control | 150 | Merge rule labels with vision labels, with physical vetoes |
 | `deckops/marks.py` | sandbox | 45 | Draw numbered box outlines on slide pictures for the vision model |
 | `tools/inspect_deck.py` | local | 30 | Shape ids per slide (debugging) |
 | `tools/compare_kits.py` | local | 55 | Automatic kit vs a reference kit |
-| `samples/`, `examples/`, `tests/` | — | — | Example templates and kits, runnable examples, 21 tests |
+| `samples/`, `examples/`, `tests/` | — | — | Example templates and kits, runnable examples, 26 tests |
 
 ---
 
 ## 10. Known limits and next steps
 
-1. **Connect a real model** through the existing OpenAI-compatible planner, and feed compile
-   errors back to it for one retry.
+1. **Connect a real model** through the existing OpenAI-compatible planner. Two-stage generation,
+   per-slide retries and the overflow repair loop are built and tested with offline renderers, but
+   not yet against a real model.
 2. **Headline numbers should be data-bound like charts.** Today `stats` values are text typed by
    the model; they should reference a dataset cell.
 3. **Overlap detection** covers text shapes only, not pictures or decoration.
@@ -553,3 +568,7 @@ The command-line + JSON contract stays the same.
    persisted state; one progress event per sandbox call.
 8. **Automatic kit rules** were tuned on two templates; more templates will need more rules. Failing
    patterns are dropped, not guessed. The vision step is wired but untested against a real model.
+9. **Item limits are measured** (`kit_check.measure_capacity`): test slides with more items than the
+   example, text 15% longer than the example's, up to 16; the limit is the last count with no overflow
+   and no item leaving the example's item area. Real text much longer than the example's can still
+   overflow; the repair loop handles that.

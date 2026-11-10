@@ -174,13 +174,19 @@ def edit(root, src_path, plan, compile_fn, slide_numbers, planner_name, log=prin
     return run, manifest
 
 
-def create_from_kit(root, kit_path, brief, content, planner, log=print, plan=None):
+def create_from_kit(root, kit_path, brief, content, planner, log=print, plan=None, outline=None,
+                    retries=2, two_stage=True):
     """Create a new deck in the look of an example deck (see deckops/patterns.py).
 
     content: the "content pack" - facts the deck may use, gathered by the agent layer.
     plan:    optional ready-made plan (skips the model; used for tests and hand-written decks).
+    outline: optional ready-made stage-1 content (skips the outline call; stage 2 still runs).
+    Otherwise two stages (controlplane/slide_flow.py): the model writes the content slide by slide,
+    then fills one layout per slide; compile errors and text that doesn't fit go back to the model
+    for that slide only, up to `retries` times.
     """
     from deckops.patterns import compile_from_kit, describe_kit, leaked_text, load_kit
+    from . import slide_flow
     kit = load_kit(kit_path)
     run = Run(root, planner, log)
     log(f"run {run.id}  create from style kit '{kit.get('name', '?')}'")
@@ -188,39 +194,82 @@ def create_from_kit(root, kit_path, brief, content, planner, log=print, plan=Non
     shutil.copy(tpl, run.p("source.pptx"))                                      # 0 intake
     _, index = run.box("probe", "source.pptx", "index.json")                     # 1 survey the example deck
     log(f"  probe: {len(index['slides'])} example slides, {len(kit['patterns'])} patterns in kit")
-    if plan is None:                                                             # 2 plan (the model)
+    jobs = None
+    if plan is None and (outline is not None or two_stage):                      # 2 plan: two stages
+        if outline is None:
+            outline = planner.outline(brief, content, slide_flow.max_points(kit))
+        run.save("outline.json", outline)
+        plan, jobs, attempts = slide_flow.plan_slides(outline, kit, index, content, planner, retries, log)
+        run.save("render_attempts.json", attempts)
+        log(f"  stage 2: {len(plan['slides'])} slides rendered, "
+            f"{sum(len(a) - 1 for a in attempts)} retried after an error")
+    elif plan is None:                                                           # 2 plan: one call
         plan = planner.plan_from_kit(brief, describe_kit(kit), content)
-    run.save("plan.json", plan)
-    ops = compile_from_kit(plan, index, kit, content)                            # 3 work orders (pure)
-    log(f"  compile: {len(plan['slides'])} slides -> {len(ops)} ops "
-        f"({sum(len(o.get('steps', [])) for o in ops)} steps on copied slides)")
-    run.save("ops.json", ops)
-    rc, ex = run.box("execute", "source.pptx", "ops.json", "out.pptx", "exec.json")   # 4 build
-    if rc == 3:
-        raise RuntimeError(f"execution refused: {ex['errors']}")
-    # baseline: how tight the example slides already were, so we only flag what our text made worse
+
     ex_slides = sorted({p["slide"] - 1 for p in kit["patterns"].values()})
     _, base = run.box("validate", "source.pptx", ",".join(map(str, ex_slides)), "-", "baseline.json")
     base_ratio = {(f["slide_index"], f["ref"].rsplit("shape:", 1)[1]): f["ratio"]
                   for f in base["findings"] if f["kind"] == "overflow"}
     base_overlaps = {(f["slide_index"], tuple(f["shapes"])) for f in base["findings"] if f["kind"] == "overlap"}
-    _, val = run.box("validate", "out.pptx", "all", "render0", "validate.json")  # 5 check
 
-    def example_slide(f):
-        return kit["patterns"][plan["slides"][f["slide_index"]]["pattern"]]["slide"] - 1
+    def build(plan, tag):
+        run.save("plan.json", plan)
+        ops = compile_from_kit(plan, index, kit, content)                        # 3 work orders (pure)
+        log(f"  compile{tag}: {len(plan['slides'])} slides -> {len(ops)} ops "
+            f"({sum(len(o.get('steps', [])) for o in ops)} steps on copied slides)")
+        run.save("ops.json", ops)
+        rc, ex = run.box("execute", "source.pptx", "ops.json", "out.pptx", "exec.json")   # 4 build
+        if rc == 3:
+            raise RuntimeError(f"execution refused: {ex['errors']}")
+        _, val = run.box("validate", "out.pptx", "all", "render0", "validate.json")      # 5 check
 
-    def keep(f):
-        if f["kind"] == "overlap":           # new overlap = not already present on the example slide
-            return (example_slide(f), tuple(f["shapes"])) not in base_overlaps
-        return f["ratio"] > 1.03 * max(1.0, base_ratio.get((example_slide(f), f["ref"].rsplit("shape:", 1)[1]), 0))
-    val["findings"] = [f for f in val["findings"] if keep(f)]
-    _, out_index = run.box("probe", "out.pptx", "out_index.json")
+        def example_slide(f):
+            return kit["patterns"][plan["slides"][f["slide_index"]]["pattern"]]["slide"] - 1
+
+        def keep(f):
+            if f["kind"] == "overlap":       # new overlap = not already present on the example slide
+                return (example_slide(f), tuple(f["shapes"])) not in base_overlaps
+            return f["ratio"] > 1.03 * max(1.0, base_ratio.get((example_slide(f), f["ref"].rsplit("shape:", 1)[1]), 0))
+        val["findings"] = [f for f in val["findings"] if keep(f)]
+        _, out_index = run.box("probe", "out.pptx", "out_index.json")
+        return ops, ex, val, out_index
+
+    ops, ex, val, out_index = build(plan, "")
+    repairs = []
+    for round_ in range(1, retries + 1):                                         # 6 send problems back
+        if not (val["findings"] and jobs):
+            break
+        texts = {sh["ref"]: " ".join(p["text"] for p in sh.get("paras", []))
+                 for sl in out_index["slides"] for sh in sl["shapes"]}
+        by_slide = {}
+        for f in val["findings"]:
+            if f["kind"] == "overflow":
+                # text wraps by whole lines, so ask for a length that fits the lines the box holds
+                text = texts.get(f["ref"], "")
+                line = 1.2 * (f.get("max_font_pt") or 12)
+                fits, needs = max(1, int(f["available_pt"] // line)), max(1.0, f["needed_pt"] / line)
+                limit = max(8, int(len(text) * fits / needs * 0.9))
+                msg = f'text too long for its box: "{text[:160]}"; rewrite it in at most {limit} characters'
+            else:
+                msg = "two text boxes overlap: use shorter text or fewer items"
+            by_slide.setdefault(f["slide_index"], []).append(msg)
+        log(f"  repair round {round_}: slides {[i + 1 for i in by_slide]} sent back with what to fix")
+        for i, msgs in by_slide.items():
+            ctx = {"deck_title": plan.get("title", ""), "slide": i + 1, "of": len(plan["slides"])}
+            fixed, att = slide_flow.render_one(planner, jobs[i], ctx, index, kit, content, retries,
+                                               feedback=msgs, previous=plan["slides"][i], log=log)
+            repairs.append({"round": round_, "slide": i + 1, "feedback": msgs, "attempts": att})
+            if fixed:
+                plan["slides"][i] = fixed
+        ops, ex, val, out_index = build(plan, f" (repair {round_})")
+    if repairs:
+        run.save("repairs.json", repairs)
     leaked = leaked_text(index, kit, plan, out_index)
     log(f"  validate: {len(val['findings'])} overflow, structural={val['structural'] or 'ok'}, "
         f"example text leaked: {len(leaked)}")
     manifest = {"run": run.id, "mode": "create_from_kit", "kit": kit.get("name"), "planner": planner.name,
                 "slides": len(plan["slides"]), "ops": len(ops), "exec": ex, "findings": val["findings"],
-                "structural": val["structural"], "leaked_example_text": leaked,
+                "structural": val["structural"], "leaked_example_text": leaked, "repairs": len(repairs),
                 "previews": val.get("previews"), "trace": run.trace}
     run.save("manifest.json", manifest)
     return run, manifest
@@ -235,9 +284,10 @@ def prepare_template(root, template_path, planner, log=print):
     4 control plane, optional: the vision model labels each numbered box and names the slide kind;
       kit_merge marries the two (structure from rules, meaning from vision, physical vetoes)
     5 keep the first slide of each kind; acceptance test (build + check test slides) on the rest
+    6 measure how many items each pattern really holds (more than the example shows, if they fit)
     """
     from deckops.patterns import validate_kit
-    from .kit_check import acceptance_test
+    from .kit_check import acceptance_test, measure_capacity
     from .kit_merge import boxes_for_vision, merge
     run = Run(root, planner, log)
     log(f"run {run.id}  prepare template {os.path.basename(template_path)}")
@@ -292,9 +342,12 @@ def prepare_template(root, template_path, planner, log=print):
         run.save("vision_labels.json", answers)        # raw answers: replay with --labels, no model needed
     pngs = {name: png(p) for name, p in merged.items()}
     final, report = acceptance_test(root, run.p("merged_kit.json"), index, planner, log, pngs)
+    run.save("accepted_kit.json", final)
+    final, capacity = measure_capacity(root, run.p("accepted_kit.json"), index, planner, log)   # 6 how many fit
+    log("  capacity: " + ", ".join(f"{n} {r['example']}->{r['max']}" for n, r in capacity.items()))
     run.save("kit.json", final)
     run.save("kit_report.json", {"draft_notes": draft.get("notes"), "id_problems": bad,
-                                 "labels": decisions, "patterns": report})
+                                 "labels": decisions, "patterns": report, "capacity": capacity})
     passed = sorted(final["patterns"])
     log(f"  kit: {len(passed)} of {len(merged)} patterns passed: {passed}"
         + ("" if vision else "  (rules only: no vision model)"))

@@ -41,11 +41,11 @@ def _example_text(shape: dict) -> list[str]:
 LONG_ROLES = {"body", "points", "text", "commentary", "intro"}
 
 
-def _value(shape, full, field=""):
+def _value(shape, full, field="", stretch=1.0):
     paras = _example_text(shape)
     if not full:
         return "Sample"
-    vals = [dummy(max(4, len(p))) for p in paras]
+    vals = [dummy(max(4, int(len(p) * stretch))) for p in paras]
     return vals if len(vals) > 1 else vals[0]
 
 
@@ -69,17 +69,20 @@ def role_problems(pat: dict, shapes: dict) -> list[str]:
     return out
 
 
-def test_slides(name: str, pat: dict, index: dict) -> list[dict]:
+def test_slides(name: str, pat: dict, index: dict, counts=None, stretch=1.0) -> list[dict]:
+    """Test slides for one pattern. Default: a minimal and a full variant. With counts=[n, ...]:
+    one full-text slide per item count (used to measure how many items really fit)."""
     shapes = _shapes_by_id(index["slides"][pat["slide"] - 1])
     slides = []
-    for full in (False, True):
-        s = {"pattern": name, "fields": {f: _value(shapes[sid], full) for f, sid in pat["fields"].items()
+    for full, count in ([(False, None), (True, None)] if counts is None else [(True, c) for c in counts]):
+        s = {"pattern": name, "fields": {f: _value(shapes[sid], full, stretch=stretch) for f, sid in pat["fields"].items()
                                          if f not in ("page", "footer")}}
         if "items" in pat:
             it = pat["items"]
-            n = len(it["groups"]) if full else max(1, it.get("min", 1))
+            n = count or (len(it["groups"]) if full else max(1, it.get("min", 1)))
             g0 = it["groups"][0]
-            s["items"] = [{f: _value(shapes[g0[pos]], full) for f, pos in it["fields"].items() if f != "number"}
+            s["items"] = [{f: _value(shapes[g0[pos]], full, stretch=stretch) for f, pos in it["fields"].items()
+                           if f != "number"}
                           for _ in range(n)]
         if "charts" in pat:
             s["charts"] = {slot: {"type": "column", "dataset": "test_data", "category": "Category", "series": ["Value"]}
@@ -144,3 +147,65 @@ def acceptance_test(root, kit_path, index, planner=None, log=print, example_pngs
     final["patterns"] = {n: p for n, p in kit["patterns"].items() if report.get(n, {}).get("passed")}
     final.pop("draft", None)
     return final, report
+
+
+CAPACITY_CAP = 16          # never offer more than this many items on one slide
+HEADROOM = 1.15            # measure with text 15% longer than the example's
+
+
+def measure_capacity(root, kit_path, index, planner=None, log=print, cap=CAPACITY_CAP):
+    """How many items does each pattern really hold? Measured, not guessed.
+
+    The example slide shows k items. Build one test slide each with k+1, k+2 ... cap items, using
+    text as long as the example's, and run the normal checks. A pattern's max becomes the largest
+    count before the first failure (text overflow, overlap, or a layout that can't be built).
+    Returns (kit with measured "max", {pattern: {"example": k, "max": m, "first_failure": ...}}).
+    """
+    from . import orchestrator
+    kit = json.load(open(kit_path))
+    trial = copy.deepcopy(kit)
+    slides, owner, report = [], [], {}
+    for name, pat in kit["patterns"].items():
+        if "items" not in pat:
+            continue
+        k = len(pat["items"]["groups"])
+        report[name] = {"example": k, "max": k, "first_failure": None}
+        counts = list(range(k + 1, cap + 1))
+        if not counts:
+            continue
+        trial["patterns"][name]["items"]["max"] = cap
+        one = copy.deepcopy(trial)
+        one["patterns"] = {name: trial["patterns"][name]}
+        # text 15% longer than the example's: the limit must leave room for real sentences
+        for n, s in zip(counts, test_slides(name, pat, index, counts, stretch=HEADROOM)):
+            try:
+                compile_from_kit({"footer": "Sample footer text", "slides": [s]}, index, one, {"datasets": TEST_DATA})
+            except CompileError as e:
+                report[name]["_compile_fail"] = (n, e.args[0][0])
+                break
+            slides.append(s)
+            owner.append((name, n))
+    if slides:
+        path = os.path.join(os.path.dirname(os.path.abspath(kit_path)), "capacity_trial_kit.json")
+        json.dump(trial, open(path, "w"), indent=1)
+        run, man = orchestrator.create_from_kit(root, path, "capacity test", {"datasets": TEST_DATA},
+                                                planner, log=log, plan={"footer": "Sample footer text",
+                                                                        "slides": slides})
+        bad = {}
+        for f in man["findings"]:
+            name, n = owner[f["slide_index"]]
+            bad.setdefault(name, set()).add(n)
+        broken = bool(man["structural"] or man["leaked_example_text"])
+        for name, r in report.items():
+            tried = sorted(n for nm, n in owner if nm == name)
+            for n in tried:
+                if broken or n in bad.get(name, ()):
+                    r["first_failure"] = f"{n} items: text no longer fits"
+                    break
+                r["max"] = n
+    for name, r in report.items():
+        cf = r.pop("_compile_fail", None)
+        if cf and not r["first_failure"] and r["max"] == cf[0] - 1:
+            r["first_failure"] = f"{cf[0]} items: {cf[1]}"
+        kit["patterns"][name]["items"]["max"] = r["max"]
+    return kit, report

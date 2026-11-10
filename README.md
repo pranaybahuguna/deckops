@@ -32,7 +32,7 @@ python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt
 Then, on either:
 
 ```
-python3 -m pytest -q tests        # 21 tests, ~3 s
+python3 -m pytest -q tests        # 26 tests, ~3 s
 python3 run_demo.py               # full pipeline offline; outputs in out/
 ```
 
@@ -186,8 +186,20 @@ which shape on it holds which piece of content. Example (abridged):
 ### What happens when a deck is created
 
 1. **Probe** the example deck in the sandbox: every slide, shape id, position and text.
-2. **Plan.** The model gets the list of patterns (names, `use_for`, field names, never positions or
-   colours) and the content pack. It returns which pattern each slide uses and the text for each field.
+2. **Plan, in two stages** (`controlplane/slide_flow.py`):
+   - **Stage 1, content (one model call).** From the content pack, the model writes what each slide
+     says: purpose, title, points, figures and the facts they come from. No layouts, no field names.
+   - **Stage 2, layout (one call per slide, in parallel).** Code works out which layouts can hold the
+     slide (item counts measured per template; table and chart slides only get table and chart
+     layouts; cover only first, closing only last). The model gets the slide's content plus only those
+     layouts, picks one and fills its fields. A slide with more points than any layout holds is split
+     into "(1/2)", "(2/2)".
+   - **Errors go back to the model, per slide.** Each rendered slide is compiled on its own; an error
+     ("needs 1-8 items, got 10") is sent back with the previous answer, up to 2 retries. After the
+     build, text that doesn't fit goes back the same way ("rewrite it in at most 48 characters"), and
+     only that slide is redone.
+   - Without a model: `--outline outline.json` supplies stage 1 and a rule-based renderer does stage 2.
+     `--single-call` keeps the old one-call planning.
 3. **Compile** (pure code). For each planned slide:
    - copy the example slide;
    - if there are more items than the example has, duplicate an item's shapes; if fewer, delete the extras;
