@@ -76,7 +76,7 @@ def translate(root, src_path, lang, slide_numbers, planner, log=print):
     # made worse - the heuristic is approximate and many real decks already "overflow".
     scope_arg = ",".join(map(str, sorted(scope)))
     _, base = run.box("validate", "source.pptx", scope_arg, "-", "baseline.json")
-    base_ratio = {f["ref"]: f["ratio"] for f in base["findings"]}
+    base_ratio = {f["ref"]: f["ratio"] for f in base["findings"] if f["kind"] == "overflow"}
     log(f"  baseline: {len(base_ratio)} shapes already tight in the source")
     for attempt in range(MAX_REPAIR + 1):
         run.save("ops.json", ops)
@@ -87,6 +87,7 @@ def translate(root, src_path, lang, slide_numbers, planner, log=print):
                          f"render{attempt}", "validate.json")                     # 7 validate
         over = [f for f in val["findings"] if f["kind"] == "overflow"
                 and f["ratio"] > max(1.0, base_ratio.get(f["ref"], 0)) * 1.03]
+        val["overlaps"] = [f for f in val["findings"] if f["kind"] == "overlap"]
         val["findings"] = over
         log(f"  validate (attempt {attempt}): {len(over)} new overflow"
             f"{' (template has autofit: PowerPoint may shrink it on edit, LibreOffice will not)' if any(f['masked_by_autofit'] for f in over) else ''}"
@@ -154,12 +155,15 @@ def edit(root, src_path, plan, compile_fn, slide_numbers, planner_name, log=prin
     run.save("ops.json", ops)
     scope = ",".join(str(n - 1) for n in slide_numbers)
     _, base = run.box("validate", "source.pptx", scope, "-", "baseline.json")
-    base_ratio = {f["ref"]: f["ratio"] for f in base["findings"]}
+    base_ratio = {f["ref"]: f["ratio"] for f in base["findings"] if f["kind"] == "overflow"}
+    base_overlaps = {(f["slide_index"], tuple(f["shapes"])) for f in base["findings"] if f["kind"] == "overlap"}
     rc, ex = run.box("execute", "source.pptx", "ops.json", "out.pptx", "exec.json")
     if rc == 3:
         raise RuntimeError(f"execution refused: {ex['errors']}")
     _, val = run.box("validate", "out.pptx", scope, "render0", "validate.json")
-    over = [f for f in val["findings"] if f["ratio"] > max(1.0, base_ratio.get(f["ref"], 0)) * 1.03]
+    over = [f for f in val["findings"]
+            if (f["kind"] == "overflow" and f["ratio"] > max(1.0, base_ratio.get(f["ref"], 0)) * 1.03)
+            or (f["kind"] == "overlap" and (f["slide_index"], tuple(f["shapes"])) not in base_overlaps)]
     val["structural"] = [p for p in val["structural"] if p not in base["structural"]]   # only what WE broke
     log(f"  validate: {len(over)} new overflow, new structural problems={val['structural'] or 'none'}"
         f" (pre-existing in source: {base['structural'] or 'none'})")
@@ -197,12 +201,19 @@ def create_from_kit(root, kit_path, brief, content, planner, log=print, plan=Non
     # baseline: how tight the example slides already were, so we only flag what our text made worse
     ex_slides = sorted({p["slide"] - 1 for p in kit["patterns"].values()})
     _, base = run.box("validate", "source.pptx", ",".join(map(str, ex_slides)), "-", "baseline.json")
-    base_ratio = {(f["slide_index"], f["ref"].rsplit("shape:", 1)[1]): f["ratio"] for f in base["findings"]}
+    base_ratio = {(f["slide_index"], f["ref"].rsplit("shape:", 1)[1]): f["ratio"]
+                  for f in base["findings"] if f["kind"] == "overflow"}
+    base_overlaps = {(f["slide_index"], tuple(f["shapes"])) for f in base["findings"] if f["kind"] == "overlap"}
     _, val = run.box("validate", "out.pptx", "all", "render0", "validate.json")  # 5 check
-    val["findings"] = [f for f in val["findings"]
-                       if f["ratio"] > 1.03 * max(1.0, base_ratio.get(
-                           (kit["patterns"][plan["slides"][f["slide_index"]]["pattern"]]["slide"] - 1,
-                            f["ref"].rsplit("shape:", 1)[1]), 0))]
+
+    def example_slide(f):
+        return kit["patterns"][plan["slides"][f["slide_index"]]["pattern"]]["slide"] - 1
+
+    def keep(f):
+        if f["kind"] == "overlap":           # new overlap = not already present on the example slide
+            return (example_slide(f), tuple(f["shapes"])) not in base_overlaps
+        return f["ratio"] > 1.03 * max(1.0, base_ratio.get((example_slide(f), f["ref"].rsplit("shape:", 1)[1]), 0))
+    val["findings"] = [f for f in val["findings"] if keep(f)]
     _, out_index = run.box("probe", "out.pptx", "out_index.json")
     leaked = leaked_text(index, kit, plan, out_index)
     log(f"  validate: {len(val['findings'])} overflow, structural={val['structural'] or 'ok'}, "
@@ -213,3 +224,45 @@ def create_from_kit(root, kit_path, brief, content, planner, log=print, plan=Non
                 "previews": val.get("previews"), "trace": run.trace}
     run.save("manifest.json", manifest)
     return run, manifest
+
+
+def prepare_template(root, template_path, planner, log=print):
+    """Template in, tested style kit out. No person involved.
+
+    sandbox: draft kit by rules + map + render examples  ->  control plane: optional vision labels,
+    check every id  ->  acceptance test (build + check test slides)  ->  final kit = what passed.
+    """
+    from deckops.patterns import validate_kit
+    from .kit_check import acceptance_test
+    run = Run(root, planner, log)
+    log(f"run {run.id}  prepare template {os.path.basename(template_path)}")
+    shutil.copy(template_path, run.p("source.pptx"))
+    _, draft = run.box("autokit", "source.pptx", "draft_kit.json")                    # 1 rules (sandbox)
+    _, index = run.box("probe", "source.pptx", "index.json")
+    log(f"  draft: {len(draft['patterns'])} patterns found: {sorted(draft['patterns'])}")
+    kit = {k: v for k, v in draft.items() if k not in ("notes",)}
+    bad = validate_kit(kit, index)                                                    # 2 ids exist?
+    for name in {e.split("'")[1] for e in bad if "'" in e}:
+        kit["patterns"].pop(name, None)
+    slides = sorted(p["slide"] - 1 for p in kit["patterns"].values())
+    _, rend = run.box("validate", "source.pptx", ",".join(map(str, slides)), "examples", "examples.json")
+    pngs = {name: open(run.p(f"examples/slide-{p['slide']:02d}.png"), "rb").read() for name, p in kit["patterns"].items()}
+    vision = getattr(planner, "vision", False)
+    if vision:                                                                        # 3 optional vision labels
+        for name, p in list(kit["patterns"].items()):
+            try:
+                v = planner.describe_pattern(pngs[name], p)
+                if v.get("offer") is False:
+                    kit["patterns"].pop(name)
+                elif isinstance(v.get("use_for"), str):
+                    p["use_for"] = v["use_for"][:160]
+            except Exception as e:
+                log(f"  vision label failed for {name}: {e.__class__.__name__}; keeping rule-based label")
+    kit["template"] = "source.pptx"
+    run.save("draft_checked_kit.json", kit)
+    final, report = acceptance_test(root, run.p("draft_checked_kit.json"), index, planner, log, pngs)   # 4 test
+    run.save("kit.json", final)
+    run.save("kit_report.json", {"draft_notes": draft.get("notes"), "id_problems": bad, "patterns": report})
+    passed = sorted(final["patterns"])
+    log(f"  kit: {len(passed)} of {len(draft['patterns'])} patterns passed: {passed}")
+    return run, final, report

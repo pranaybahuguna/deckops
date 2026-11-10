@@ -87,8 +87,15 @@ def _shape_entries(slide_ref: str, shapes, unsupported: list):
         elif shp.has_text_frame:
             entry.setdefault("kind", "text")
             entry["paras"] = _paragraphs(ref, shp.text_frame._txBody)
+            sizes = [r.font.size.pt for p in shp.text_frame.paragraphs for r in p.runs if r.font.size]
+            entry["font_pt"] = max(sizes) if sizes else None
         elif shp.shape_type == MSO_SHAPE_TYPE.PICTURE:
             entry.setdefault("kind", "picture")
+            try:
+                import hashlib
+                entry["image_sha"] = hashlib.sha256(shp.image.blob).hexdigest()[:16]
+            except Exception:
+                entry["image_sha"] = None
         else:
             entry.setdefault("kind", "other")
         yield entry

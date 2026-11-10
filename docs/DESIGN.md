@@ -95,12 +95,33 @@ file, and the next step reads it. That makes every step inspectable and replayab
 The slide we follow: **slide 5 of the new deck, "Fast enough to feel instant"**, a column chart
 plus three observations, built from the template's `chart` pattern (example slide 5).
 
-### Step 0 (once per template): write the style kit
+### Step 0 (once per template): build the style kit automatically
 
-**Who:** a person (or a model, reviewed by a person). **Tool:** `tools/inspect_deck.py template.pptx`.
+**Who:** nobody; it is code. **Code:** `orchestrator.prepare_template()` → sandbox `autokit`
+(`deckops/autokit.py`) → `validate_kit` → optional vision labels (control plane) →
+`kit_check.acceptance_test`.
 
-The inspect tool prints every shape on every example slide with its id, position and text. From
-that, one entry per pattern is written:
+**Input:** the template `.pptx`. **Output:** `kit.json` + `kit_report.json`.
+
+1. *Draft (sandbox, no network).* For each slide: find chrome (title = biggest text near the top,
+   subtitle under it, page number = short number at the bottom, footer = small text at the bottom);
+   find repeated items (same box shape repeated 2-12 times, each copy with the same neighbours at the
+   same offsets); find chart areas (big boxes that are empty or say "chart"); name the remaining text
+   by capacity (only a box holding ≥ 1.8 lines can be "body", "commentary" or "intro"). Pictures seen
+   on at least half the slides are decoration and are listed in `keep`; any other picture is content.
+2. *Id check* (`validate_kit`): drop patterns with ids that do not exist or groups that don't line up.
+3. *Vision (optional, control plane only).* The sandbox renders each example slide to PNG. The control
+   plane sends the PNGs to a vision model, which returns a better `use_for` line. The sandbox never
+   has network or model access.
+4. *Acceptance test.* Each pattern is filled with dummy text as long as the example's text, in a
+   minimum and a full variant; one test deck is built and validated (overflow, overlap, leaked text
+   or pictures). A pattern that fails is dropped and the reason goes in the report. A long-text field
+   whose box holds under 1.8 lines also fails.
+
+Measured: on the bundled example template the automatic kit matches the hand-written one exactly;
+on two real templates all 9 patterns passed; two deliberately broken kits were caught.
+
+A pattern entry looks like this:
 
 ```json
 "chart": {
@@ -119,6 +140,8 @@ plus one style block for the whole kit:
 
 Meaning: on example slide 5, shape 3 is the title, shape 11 holds the bullet points, and shape 8
 is a plain rectangle marking where the chart goes. `page` and `footer` are filled automatically.
+An optional `"keep": [ids]` lists pictures (logos) that stay; every other picture on the example
+slide is removed when the slide is reused.
 
 **Used by:** Step 3 (the menu shown to the model) and Step 4 (where to put each piece of content).
 
@@ -366,8 +389,9 @@ Real output: `{"structural": [], "findings": [], "pdf": "render0/out.pdf", "prev
 
 Collects every paragraph of 12+ characters from the example slides (`index.json`), removes any
 text the plan itself supplied (the model may legitimately reuse "What it shows"), and intersects
-the rest with every paragraph in the new deck (`out_index.json`). Anything left = leaked template
-content. Real result: `[]`.
+the rest with every paragraph in the new deck (`out_index.json`). It does the same for pictures,
+by a fingerprint (SHA-256) of the image bytes, skipping pictures the kit keeps. Anything left =
+leaked template content. Real result: `[]`.
 
 **Used by:** Step 8, and a non-empty result should block delivery.
 
@@ -497,8 +521,11 @@ The command-line + JSON contract stays the same.
 | `deckops/probe.py` | sandbox | 155 | .pptx → DeckIndex |
 | `deckops/executor.py` | sandbox | 505 | Bind, apply, clone slides, draw charts, byte-preserving save |
 | `deckops/validate.py` | sandbox | 190 | Structure, overflow prediction, rendering |
-| `tools/inspect_deck.py` | local | 30 | Shape ids for writing a kit |
-| `samples/`, `examples/`, `tests/` | — | — | Example templates and kits, runnable examples, 13 tests |
+| `deckops/autokit.py` | sandbox | 390 | Draft a style kit from a template with rules |
+| `controlplane/kit_check.py` | control | 200 | Acceptance test for a kit; drops failing patterns |
+| `tools/inspect_deck.py` | local | 30 | Shape ids per slide (debugging) |
+| `tools/compare_kits.py` | local | 55 | Automatic kit vs a reference kit |
+| `samples/`, `examples/`, `tests/` | — | — | Example templates and kits, runnable examples, 16 tests |
 
 ---
 
@@ -508,10 +535,12 @@ The command-line + JSON contract stays the same.
    errors back to it for one retry.
 2. **Headline numbers should be data-bound like charts.** Today `stats` values are text typed by
    the model; they should reference a dataset cell.
-3. **Overlap detection.** Only text overflow is detected; shapes overlapping each other are not.
+3. **Overlap detection** covers text shapes only, not pictures or decoration.
 4. **Patterns can't contain charts or SmartArt** (use a chart-area rectangle instead).
 5. **Restyle mode** (move an existing deck onto a new template) is not built yet.
 6. **Production sandbox and storage:** microVM per editing session, workspace in object storage,
    checkpointing so a run survives a restarted worker.
 7. **Orchestration:** wrap the steps as nodes of the host application's workflow framework, with
    persisted state; one progress event per sandbox call.
+8. **Automatic kit rules** were tuned on two templates; more templates will need more rules. Failing
+   patterns are dropped, not guessed. The vision step is wired but untested against a real model.

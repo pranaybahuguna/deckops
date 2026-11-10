@@ -103,6 +103,54 @@ def load_kit(path: str) -> dict:
     return kit
 
 
+def validate_kit(kit: dict, index: dict) -> list[str]:
+    """Check every id in the kit against the probed template. Returns a list of problems."""
+    errs = []
+    n_slides = len(index["slides"])
+    for name, p in kit["patterns"].items():
+        where = f"kit pattern {name!r}"
+        if not isinstance(p.get("slide"), int) or not 1 <= p["slide"] <= n_slides:
+            errs.append(f"{where}: slide {p.get('slide')} not in template (1-{n_slides})")
+            continue
+        shapes = _shapes_by_id(index["slides"][p["slide"] - 1])
+        seen = []
+        def need(sid, what, text=False):
+            seen.append(sid)
+            if sid not in shapes:
+                errs.append(f"{where}: {what}: slide {p['slide']} has no shape {sid}")
+            elif text and "paras" not in shapes[sid] and "cells" not in shapes[sid]:
+                errs.append(f"{where}: {what}: shape {sid} can't hold text")
+        for fname, sid in p["fields"].items():
+            need(sid, f"field {fname!r}", text=True)
+        for slot, sid in p.get("charts", {}).items():
+            need(sid, f"chart slot {slot!r}")
+        if "table" in p:
+            need(p["table"]["shape"], "table")
+            if p["table"]["shape"] in shapes and "cells" not in shapes[p["table"]["shape"]]:
+                errs.append(f"{where}: shape {p['table']['shape']} is not a table")
+        if "items" in p:
+            groups = p["items"]["groups"]
+            if not groups or len({len(g) for g in groups}) != 1:
+                errs.append(f"{where}: item groups must all have the same number of shapes")
+            for gi, g in enumerate(groups):
+                for sid in g:
+                    need(sid, f"item {gi + 1}")
+            for fname, pos in p["items"]["fields"].items():
+                if groups and not 0 <= pos < len(groups[0]):
+                    errs.append(f"{where}: item field {fname!r} points at position {pos}, groups have {len(groups[0])}")
+                elif groups:
+                    for g in groups:
+                        if g[pos] in shapes and "paras" not in shapes[g[pos]]:
+                            errs.append(f"{where}: item field {fname!r}: shape {g[pos]} can't hold text")
+        for sid in p.get("keep", []):
+            if sid not in shapes:
+                errs.append(f"{where}: keep: slide {p['slide']} has no shape {sid}")
+        dup = {s for s in seen if seen.count(s) > 1}
+        if dup:
+            errs.append(f"{where}: shapes used twice: {sorted(dup)}")
+    return errs
+
+
 def describe_kit(kit: dict) -> str:
     """What the model is told about the available slide patterns (no geometry, no colours)."""
     lines = []
@@ -190,6 +238,9 @@ def layout_items(groups_geom: list[list[dict]], n: int, max_columns: int | None 
 # ---- the compiler ---------------------------------------------------------------------------
 
 def compile_from_kit(plan: dict, index: dict, kit: dict, content: dict | None = None) -> list[dict]:
+    kit_errors = validate_kit(kit, index)
+    if kit_errors:
+        raise CompileError(kit_errors)
     errors, ops = [], []
     datasets = (content or {}).get("datasets", {})
     total = len(plan["slides"])
@@ -287,9 +338,13 @@ def compile_from_kit(plan: dict, index: dict, kit: dict, content: dict | None = 
                 if step:
                     steps.append({**step, "target": f"shape:{sid}"})
 
-        # leak guard: any example text the plan didn't claim is removed
+        # leak guard: any example text the plan didn't claim is removed, and so is every picture
+        # the kit doesn't explicitly keep (a logo is design; a screenshot or diagram is content)
+        keep = set(pat.get("keep", []))
         for sid, shp in shapes.items():
-            if sid not in used and _text_of(shp) and shp.get("kind") != "group":
+            if sid in used or shp.get("kind") == "group":
+                continue
+            if _text_of(shp) or (shp.get("kind") == "picture" and sid not in keep):
                 steps.append({"op": "delete_shape", "target": f"shape:{sid}"})
 
         ops.append({"op": "add_slide_from_pattern", "source": ex["ref"], "steps": steps, "notes": s.get("notes")})
@@ -325,7 +380,17 @@ def _strings(v):
 
 
 def leaked_text(index: dict, kit: dict, plan: dict, out_index: dict) -> list[str]:
-    """Example-slide text still present in the new deck (text the plan itself supplied doesn't count)."""
+    """Example content still present in the new deck: text (unless the plan itself supplied it)
+    and pictures (by fingerprint, unless the kit keeps them as decoration)."""
     from .probe import iter_paragraphs
     out = {p["text"].strip() for p in iter_paragraphs(out_index)}
-    return sorted((example_texts(index, kit) - set(_strings(plan))) & out)
+    leaks = sorted((example_texts(index, kit) - set(_strings(plan))) & out)
+    kept, example_pics = set(), set()
+    for p in kit["patterns"].values():
+        for shp in index["slides"][p["slide"] - 1]["shapes"]:
+            if shp.get("image_sha"):
+                sid = int(shp["ref"].rsplit("shape:", 1)[1])
+                (kept if sid in p.get("keep", []) else example_pics).add(shp["image_sha"])
+    out_pics = {shp.get("image_sha") for s in out_index["slides"] for shp in s["shapes"] if shp.get("image_sha")}
+    leaks += [f"picture {h}" for h in sorted((example_pics - kept) & out_pics)]
+    return leaks

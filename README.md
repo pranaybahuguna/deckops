@@ -173,19 +173,42 @@ re-flow as a grid.
 (see the docstring for the keys). That's useful to try things out. For production, start from your real
 template and write a kit for it.
 
-### Writing a kit for your own template
+### Getting a kit for your own template (automatic, no person involved)
 
+```python
+from controlplane import orchestrator
+from controlplane.planner import StubPlanner            # or OpenAICompatPlanner.from_file("llm.json")
+run, kit, report = orchestrator.prepare_template("runs", "my_template.pptx", StubPlanner())
 ```
-python3 tools/inspect_deck.py my_template.pptx 1 2 5    # shape ids, positions, text
-```
-Pick one good example slide per kind of content. Note the shape ids of its title, subtitle, footer
-and page number, and the ids that make up each repeated item, then write the JSON.
-`samples/make_style_template.py` builds a complete example (deck + kit) to copy from. Keep a real
-company template and its kit **outside** this repository.
+
+`prepare_template` runs once per template:
+
+1. **Draft (sandbox, rules only).** `deckops/autokit.py` reads every slide: title/subtitle/footer/page
+   by position and size, repeated items (the same box shape repeated 2-12 times, with the same
+   neighbours at the same offsets), chart areas (big empty boxes), tables. It names fields by what
+   the box can hold (a box with room for under 1.8 lines is never "body"), and takes the chart palette
+   from the slides' fills and the theme. Pictures that appear on at least half the slides (logos) are
+   kept; every other picture is content and is removed when the slide is reused.
+2. **Check the ids** (`validate_kit`): every id exists, item groups line up.
+3. **Optional vision labels (control plane).** The sandbox renders each example slide to PNG; the
+   control plane (never the sandbox) sends the PNG to a vision model for a better "use for" line.
+4. **Acceptance test** (`controlplane/kit_check.py`): fills every pattern with dummy text at the
+   example's length (shortest and fullest variants), builds one test deck, validates it (overflow,
+   overlap, leaks), and drops any pattern that fails. With a vision model, it also compares each test
+   slide with its example.
+
+Output: `kit.json` (passing patterns only) and `kit_report.json` (why each pattern passed or failed).
+`tools/compare_kits.py template.pptx reference_kit.json` compares an automatic kit with a hand-written
+one; on the bundled example template it matches exactly. `samples/make_style_template.py` builds that
+example (deck + kit). Keep a real company template and its kit **outside** this repository.
+
+The rules were tuned on two templates. A template with unusual layouts may get fewer patterns
+(failing patterns are dropped, not guessed); the report says why.
 
 Limits today: example slides that already hold charts, SmartArt or embedded objects can't be used as
 patterns (use a plain rectangle as the chart area instead).
-Tables must keep the example's column count. Overlapping shapes are not yet detected (only text overflow).
+Tables must keep the example's column count. Overlap between text shapes is detected; overlap with
+pictures or decoration is not.
 
 ## Design decisions found by building it
 

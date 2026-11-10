@@ -5,7 +5,8 @@ production: a Kata microVM). Contract: file paths + JSON in, files + JSON out.
 
     probe     <in.pptx> <index.json>
     execute   <in.pptx> <ops.json> <out.pptx> <report.json>
-    validate  <in.pptx> <slides|all> <outdir> <report.json>
+    validate  <in.pptx> <slides|all> <outdir|-> <report.json>
+    autokit   <template.pptx> <draft_kit.json>
     selftest  <report.json>
 """
 import json
@@ -44,6 +45,10 @@ def main(argv):
             except ExecError as e:
                 _dump(argv[4], {"ok": False, "errors": e.errors})
                 return 3
+        elif cmd == "autokit":
+            import os
+            from deckops.autokit import draft_kit
+            _dump(argv[2], draft_kit(argv[1], os.path.basename(argv[1])))
         elif cmd == "validate":
             from deckops.validate import validate
             slides = None if argv[2] == "all" else {int(x) for x in argv[2].split(",")}

@@ -133,6 +133,28 @@ def predict_overflow(prs, slide, shape, major, minor):
             "suggest_size_pt": round(max_size * min(1.0, (height / total) ** 0.5) * 0.95, 1) if total else None}
 
 
+def find_overlaps(slide, min_share=0.15):
+    """Pairs of text-holding shapes whose boxes overlap by more than min_share of the smaller box.
+    Text inside its own background box is not a problem (the box holds no text)."""
+    boxes = []
+    for sh in slide.shapes:
+        if sh.has_text_frame and sh.text_frame.text.strip() and sh.width and sh.height:
+            boxes.append((sh.shape_id, sh.left, sh.top, sh.left + sh.width, sh.top + sh.height))
+    out = []
+    for i in range(len(boxes)):
+        for j in range(i + 1, len(boxes)):
+            a, b = boxes[i], boxes[j]
+            w = min(a[3], b[3]) - max(a[1], b[1])
+            h = min(a[4], b[4]) - max(a[2], b[2])
+            if w <= 0 or h <= 0:
+                continue
+            smaller = min((a[3] - a[1]) * (a[4] - a[2]), (b[3] - b[1]) * (b[4] - b[2]))
+            share = w * h / smaller
+            if share > min_share:
+                out.append({"kind": "overlap", "shapes": [a[0], b[0]], "share": round(share, 2)})
+    return out
+
+
 def structural_checks(path):
     problems = []
     with zipfile.ZipFile(path) as z:
@@ -182,6 +204,8 @@ def validate(path, slide_indices, outdir, do_render=True):
                 if r["overflow"]:
                     findings.append({"kind": "overflow", "ref": f"slide:{s.slide_id}/shape:{shp.shape_id}",
                                      "slide_index": i, **r})
+        for o in find_overlaps(s):
+            findings.append({**o, "slide_index": i, "ref": f"slide:{s.slide_id}/shape:{o['shapes'][0]}"})
     report = {"structural": structural_checks(path), "findings": findings}
     if do_render:
         pages = list(range(len(prs.slides))) if slide_indices is None else sorted(slide_indices)

@@ -151,6 +151,38 @@ class OpenAICompatPlanner:
         user = json.dumps({"request": brief, "content_pack": content}, ensure_ascii=False)
         return self._chat(KIT_SYSTEM.replace("{patterns}", kit_description), user)
 
+    # ---- vision: called from the CONTROL PLANE with PNGs the sandbox rendered ------------
+    # The sandbox never talks to a model. These methods only ever receive picture bytes and JSON.
+
+    vision = True
+
+    def _chat_images(self, system, text, images: list[bytes]) -> dict:
+        import base64
+        parts = [{"type": "text", "text": text}] + [
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64," + base64.b64encode(b).decode()}}
+            for b in images]
+        body = json.dumps({"model": self.model, "temperature": 0, "response_format": {"type": "json_object"},
+                           "messages": [{"role": "system", "content": system}, {"role": "user", "content": parts}]}).encode()
+        req = urllib.request.Request(f"{self.base_url}/v1/chat/completions", data=body, headers={
+            "Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            return json.loads(json.load(r)["choices"][0]["message"]["content"])
+
+    def describe_pattern(self, png: bytes, pattern: dict) -> dict:
+        """-> {"use_for": "<one line>", "offer": true|false}"""
+        return self._chat_images(
+            "You look at one example slide from a corporate template and the content fields a program found on it. "
+            'Return JSON {"use_for": "<when to use this slide, max 20 words>", "offer": <false if the slide is too '
+            'specific to reuse>}.', json.dumps({k: pattern[k] for k in pattern if k in ("fields", "items", "charts", "table")}),
+            [png])
+
+    def compare_slides(self, example_png: bytes, test_png: bytes) -> dict:
+        """-> {"same_design": true|false, "problems": ["..."]}"""
+        return self._chat_images(
+            "Image 1 is an example slide from a template; image 2 was built from it with placeholder text. "
+            'Return JSON {"same_design": <true if image 2 keeps the design of image 1>, "problems": [<overlaps, cut-off '
+            "text, broken layout; empty if none>]}. Placeholder words are expected; judge layout only.", "", [example_png, test_png])
+
     @classmethod
     def from_file(cls, path: str) -> "OpenAICompatPlanner":
         """JSON file: {"base_url": "...", "model": "...", "api_key": "..."}. Keep it out of git."""
