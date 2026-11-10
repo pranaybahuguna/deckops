@@ -74,7 +74,7 @@ def main():
     k.add_argument("template")
     k.add_argument("kit_out")
     k.add_argument("--llm", help="optional: vision-capable model that labels each box and checks test slides")
-    k.add_argument("--labels", help="optional: replay saved slide labels (label_decisions input) instead of a model")
+    k.add_argument("--labels", help="optional: replay a run's vision_labels.json instead of calling a model")
     k.set_defaults(fn=cmd_kit)
 
     c = sub.add_parser("create", help="create a deck from a style kit")

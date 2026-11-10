@@ -267,7 +267,8 @@ run, kit, report = orchestrator.prepare_template("runs", "my_template.pptx", Stu
    overlap, leaks), and drops any pattern that fails. With a vision model, it also compares each test
    slide with its example.
 
-`--labels saved.json` replays saved vision answers instead of calling a model (handy for tests or
+Each run saves the model's raw answers as `vision_labels.json`; `--labels vision_labels.json`
+replays them instead of calling a model (handy for tests or
 to re-run without cost).
 
 Output: `kit.json` (passing patterns only) and `kit_report.json` (why each pattern passed or failed).

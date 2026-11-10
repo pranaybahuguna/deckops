@@ -263,7 +263,7 @@ def prepare_template(root, template_path, planner, log=print):
     png = lambda p, sfx="": open(run.p(f"examples/slide-{p['slide']:02d}{sfx}.png"), "rb").read()
 
     vision = getattr(planner, "vision", False)                                        # 4 vision + merge
-    merged, decisions = {}, {}
+    merged, decisions, answers = {}, {}, {}
     for key, p in sorted(cands.items(), key=lambda kv: kv[1]["slide"]):
         n = p["slide"]
         label = None
@@ -273,6 +273,8 @@ def prepare_template(root, template_path, planner, log=print):
                                             key.split("@")[0], slide=n)
             except Exception as e:
                 log(f"  vision failed on slide {n}: {e.__class__.__name__}; using the rules alone")
+        if label:
+            answers[str(n)] = label
         kind, mp, dec = merge(key, p, index["slides"][n - 1], label, n, total)
         decisions[str(n)] = {"rules": key.split("@")[0], "final": kind, "vision_used": bool(label), **dec}
         if kind is None:
@@ -286,6 +288,8 @@ def prepare_template(root, template_path, planner, log=print):
     kit["template"] = "source.pptx"
     run.save("merged_kit.json", kit)
     run.save("label_decisions.json", decisions)
+    if answers:
+        run.save("vision_labels.json", answers)        # raw answers: replay with --labels, no model needed
     pngs = {name: png(p) for name, p in merged.items()}
     final, report = acceptance_test(root, run.p("merged_kit.json"), index, planner, log, pngs)
     run.save("kit.json", final)
