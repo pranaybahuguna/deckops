@@ -183,6 +183,7 @@ from `datasets`, never from the model).
    unshare -rn -- prlimit --as=4GB --cpu=180 --fsize=512MB --nofile=512 --
        python3 -E -s dataplane_main.py probe source.pptx index.json
    ```
+   (On macOS: `sandbox-exec` with a deny-network profile plus rlimits; no memory cap.)
    `unshare -rn` gives the process no network; `prlimit` caps memory, CPU time, file size and
    open files. Its working directory is the workspace, and only file names are passed.
 3. Inside the sandbox, `zipguard.check()` runs first: file size limit, entry count, total unpacked

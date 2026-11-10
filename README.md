@@ -7,16 +7,43 @@ the model never has to produce coordinates or XML.
 
 ## How to run
 
-Needs **Linux** (or WSL2 on Windows) with Python 3.11+, LibreOffice, poppler-utils and util-linux:
+Needs Python 3.11+, LibreOffice (renders slide previews), poppler (PDF to PNG) and the
+Carlito/Liberation fonts (same letter widths as Calibri/Arial, used to predict text overflow).
+
+**macOS** (Homebrew):
+
+```
+brew install python@3.12 poppler
+brew install --cask libreoffice font-carlito font-liberation
+open -a LibreOffice          # once, so macOS lets it run; then quit it
+
+git clone https://github.com/pranaybahuguna/deckops && cd deckops
+python3.12 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt
+```
+
+**Linux** (or WSL2 on Windows):
 
 ```
 sudo apt-get install -y libreoffice-impress poppler-utils util-linux fonts-crosextra-carlito fonts-liberation
 git clone https://github.com/pranaybahuguna/deckops && cd deckops
 python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt
+```
 
+Then, on either:
+
+```
 python3 -m pytest -q tests        # 16 tests, ~3 s
 python3 run_demo.py               # full pipeline offline; outputs in out/
 ```
+
+The demo's first line must say `network inside sandbox: blocked`. If it says `REACHABLE`, stop:
+the sandbox isn't isolating on this machine.
+
+**The sandbox differs by system.** Linux uses `unshare` (no network at all) and `prlimit`
+(memory, CPU, file-size limits). macOS uses the built-in `sandbox-exec` with a profile that denies
+all IP traffic, plus CPU, file-size and open-file limits; macOS cannot cap memory this way.
+Apple marks `sandbox-exec` as deprecated, though it still ships. On both, the process can still
+*read* the host's files. Fine for trying it out; production uses a microVM (see below).
 
 On your own template:
 
@@ -47,8 +74,9 @@ python3 -m pytest -q tests                   # pure-function tests: no model, no
 `llm.json` (git-ignored): `{"base_url": "https://…", "model": "…", "api_key": "…"}`.
 No environment variables are read anywhere.
 
-**Requirements:** Linux, Python 3.11+, `python-pptx`, `lxml`, `pydantic`, `Pillow`, `pytest`,
-LibreOffice (`soffice`), `pdftoppm` (poppler-utils), `unshare` + `prlimit` (util-linux).
+**Requirements:** macOS or Linux, Python 3.11+, `python-pptx`, `lxml`, `pydantic`, `Pillow`, `pytest`,
+LibreOffice (`soffice`), `pdftoppm` (poppler), and for the sandbox `unshare` + `prlimit` (Linux)
+or the built-in `sandbox-exec` (macOS).
 
 ## What the demo proves
 
@@ -261,7 +289,8 @@ pictures or decoration is not.
 
 ## Sandbox: POC vs production
 
-The POC isolates the data plane with `unshare -rn` (user + network namespace: no network) and
+On macOS the same `sandbox.run()` uses `sandbox-exec` instead (see How to run).
+The POC isolates the data plane on Linux with `unshare -rn` (user + network namespace: no network) and
 `prlimit` (memory/CPU/file-size caps), a scrubbed environment and a timeout. It does **not** isolate the
 filesystem or the kernel. For production, replace `controlplane/sandbox.py:run()` with a microVM runtime
 (e.g. Kata Containers / Firecracker). Replace the local workspace with object storage that the VM downloads

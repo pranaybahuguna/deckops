@@ -18,7 +18,14 @@ from pptx import Presentation
 from pptx.opc.constants import RELATIONSHIP_TYPE as RT
 from pptx.oxml.ns import qn
 
-FONT_DIRS = ["/usr/share/fonts/truetype"]
+import pwd
+import shutil
+
+_REAL_HOME = pwd.getpwuid(os.getuid()).pw_dir          # the sandbox replaces $HOME, so ask the OS
+FONT_DIRS = ["/usr/share/fonts/truetype", "/usr/share/fonts", os.path.join(_REAL_HOME, "Library/Fonts"),
+             "/Library/Fonts", "/opt/homebrew/share/fonts", "/usr/local/share/fonts"]
+FALLBACK_FONTS = ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                  "/System/Library/Fonts/Supplemental/Arial.ttf", "/Library/Fonts/Arial.ttf"]
 # Metric-compatible substitutes: same advance widths as the MS originals.
 FONT_SUBST = {"calibri": "Carlito", "arial": "LiberationSans", "times new roman": "LiberationSerif",
               "cambria": "Caladea", "helvetica": "LiberationSans"}
@@ -29,11 +36,16 @@ def _font_file(name: str, bold: bool):
     fam = FONT_SUBST.get(name.lower(), name).replace(" ", "")
     style = "Bold" if bold else "Regular"
     for d in FONT_DIRS:
+        if not os.path.isdir(d):
+            continue
         for root, _, files in os.walk(d):
             for f in files:
                 if f.lower() in (f"{fam}-{style}.ttf".lower(), f"{fam}.ttf".lower()):
                     return os.path.join(root, f)
-    return "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    for f in FALLBACK_FONTS:
+        if os.path.exists(f):
+            return f
+    raise FileNotFoundError("no TrueType font found; install Carlito and Liberation fonts (see README)")
 
 
 def _theme_fonts(prs):
@@ -179,7 +191,8 @@ def structural_checks(path):
 
 def render(path, outdir, pages=None, dpi=60):
     os.makedirs(outdir, exist_ok=True)
-    subprocess.run(["soffice", "--headless", "--norestore", "--convert-to", "pdf", "--outdir", outdir, path],
+    soffice = shutil.which("soffice") or "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+    subprocess.run([soffice, "--headless", "--norestore", "--convert-to", "pdf", "--outdir", outdir, path],
                    check=True, capture_output=True, timeout=180)
     pdf = os.path.join(outdir, os.path.splitext(os.path.basename(path))[0] + ".pdf")
     pngs = []
