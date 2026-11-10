@@ -20,6 +20,7 @@ OUTLINE = {"title": "Chatbot pilot", "footer": "Support operations", "slides": [
 
 class Handler(BaseHTTPRequestHandler):
     calls = []
+    reject_temperature = False          # behave like models that only accept the default temperature
 
     def log_message(self, *a):
         pass
@@ -27,6 +28,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         Handler.calls.append({"auth": self.headers.get("Authorization"), "body": body})
+        if Handler.reject_temperature and "temperature" in body:
+            err = json.dumps({"error": {"message": "Unsupported value: 'temperature' does not support 0"}}).encode()
+            self.send_response(400)
+            self.send_header("Content-Length", str(len(err)))
+            self.end_headers()
+            self.wfile.write(err)
+            return
         system = body["messages"][0]["content"]
         user = body["messages"][1]["content"]
         if system.startswith("You write the CONTENT"):
