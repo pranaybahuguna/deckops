@@ -63,6 +63,16 @@ python3 deckops_cli.py translate deck.pptx fr 1,2,5 deck_fr.pptx --llm llm.json
 `translate` uses an offline stub that only knows the demo's strings. Every run keeps its plans, ops,
 reports and slide previews in `runs/<id>/`.
 
+## Checking it against your model
+
+```
+python3 tools/llm_check.py my_template.pptx llm.json            # uses samples/content_example.json
+```
+Builds the kit (with vision labels) and a two-stage deck, prints a summary (vision changes and vetoes,
+retries, repairs, findings) and writes `llm_check_results.zip` with the reports, previews and deck.
+`llm.json` is never put in the zip. The HTTP client is tested against a local fake server
+(`tests/fake_llm.py`), not a real model.
+
 ## Commands (reference)
 
 ```
