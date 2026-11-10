@@ -5,6 +5,39 @@ The model never writes a .pptx. It writes a **plan** (what the deck should say).
 to the deck. Untouched slides come out byte-identical, every change is an auditable op, and
 the model never has to produce coordinates or XML.
 
+## How to run
+
+Needs **Linux** (or WSL2 on Windows) with Python 3.11+, LibreOffice, poppler-utils and util-linux:
+
+```
+sudo apt-get install -y libreoffice-impress poppler-utils util-linux fonts-crosextra-carlito fonts-liberation
+git clone https://github.com/pranaybahuguna/deckops && cd deckops
+python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt
+
+python3 -m pytest -q tests        # 16 tests, ~3 s
+python3 run_demo.py               # full pipeline offline; outputs in out/
+```
+
+On your own template:
+
+```
+# 1. once per template: build and test a style kit (no person involved)
+python3 deckops_cli.py kit my_template.pptx my_kit.json
+
+# 2. new deck in that look (a model writes the plan from the kit and your content pack)
+python3 deckops_cli.py create my_kit.json content.json "brief for the deck" new.pptx --llm llm.json
+
+# 3. translate slides 1, 2 and 5
+python3 deckops_cli.py translate deck.pptx fr 1,2,5 deck_fr.pptx --llm llm.json
+```
+
+`content.json` holds the facts and datasets the deck may use (see `CONTENT` in
+`examples/create_from_style_kit.py`). Without `--llm`, `create` needs `--plan plan.json` and
+`translate` uses an offline stub that only knows the demo's strings. Every run keeps its plans, ops,
+reports and slide previews in `runs/<id>/`.
+
+## Commands (reference)
+
 ```
 python3 run_demo.py                          # end-to-end run with an offline stub planner (~6 s)
 python3 run_demo.py --llm-config llm.json    # use a real OpenAI-compatible model

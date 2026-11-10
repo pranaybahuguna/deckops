@@ -18,6 +18,7 @@ To use a real template instead, write a kit for it by hand (README, "Style kits"
 using `python3 tools/inspect_deck.py your_template.pptx` to find the shape ids.
 """
 import json
+import os
 import sys
 
 from lxml import etree
@@ -38,6 +39,7 @@ BRAND = {
     "chart_palette": ["4F46E5", "D97706", "059669", "0EA5E9", "DB2777", "64748B"],
 }
 OUT = sys.argv[1] if len(sys.argv) > 1 else "."
+os.makedirs(OUT, exist_ok=True)
 if len(sys.argv) > 2:
     BRAND.update(json.load(open(sys.argv[2])))
 B = BRAND
