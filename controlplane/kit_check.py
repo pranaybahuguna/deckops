@@ -127,7 +127,7 @@ def acceptance_test(root, kit_path, index, planner=None, log=print, example_pngs
             for name in set(owner):
                 report[name]["passed"] = False
                 report[name]["reasons"].append("structural problem or leaked example text in test deck")
-        vision = getattr(planner, "vision", False) and example_pngs
+        vision = getattr(planner, "vision", False) and getattr(planner, "can_compare", True) and example_pngs
         for i, name in enumerate(owner):                     # 3. optional: does it still look like the example?
             if not vision or i % 2 == 0 or not report[name]["passed"]:
                 continue

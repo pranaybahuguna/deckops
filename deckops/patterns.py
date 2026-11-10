@@ -342,7 +342,7 @@ def compile_from_kit(plan: dict, index: dict, kit: dict, content: dict | None = 
         # the kit doesn't explicitly keep (a logo is design; a screenshot or diagram is content)
         keep = set(pat.get("keep", []))
         for sid, shp in shapes.items():
-            if sid in used or shp.get("kind") == "group":
+            if sid in used or sid in keep or shp.get("kind") == "group":
                 continue
             if _text_of(shp) or (shp.get("kind") == "picture" and sid not in keep):
                 steps.append({"op": "delete_shape", "target": f"shape:{sid}"})

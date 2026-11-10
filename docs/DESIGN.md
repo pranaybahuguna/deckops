@@ -110,9 +110,15 @@ plus three observations, built from the template's `chart` pattern (example slid
    by capacity (only a box holding ≥ 1.8 lines can be "body", "commentary" or "intro"). Pictures seen
    on at least half the slides are decoration and are listed in `keep`; any other picture is content.
 2. *Id check* (`validate_kit`): drop patterns with ids that do not exist or groups that don't line up.
-3. *Vision (optional, control plane only).* The sandbox renders each example slide to PNG. The control
-   plane sends the PNGs to a vision model, which returns a better `use_for` line. The sandbox never
-   has network or model access.
+3. *Vision (optional, control plane only), married to the rules.* The sandbox renders each candidate
+   slide, and a copy with every fillable box outlined and numbered (`deckops/marks.py`). The control
+   plane sends the numbered picture and the rules' guesses to a vision model; it answers
+   `{"kind", "use_for", "offer", "boxes": {"9": "heading", ...}}`. `controlplane/kit_merge.py` merges:
+   structure (boxes, groups) always from the rules; names, kind and description from vision unless a
+   physical check vetoes it (box too small for long text, number not counting 1..n, value without a
+   digit, page not a page number, long text marked as decoration, kind the content can't support).
+   Decisions are saved per slide in `label_decisions.json`. Then the first slide of each kind is kept.
+   The sandbox never has network or model access.
 4. *Acceptance test.* Each pattern is filled with dummy text as long as the example's text, in a
    minimum and a full variant; one test deck is built and validated (overflow, overlap, leaked text
    or pictures). A pattern that fails is dropped and the reason goes in the report. A long-text field
@@ -524,9 +530,11 @@ The command-line + JSON contract stays the same.
 | `deckops/validate.py` | sandbox | 190 | Structure, overflow prediction, rendering |
 | `deckops/autokit.py` | sandbox | 390 | Draft a style kit from a template with rules |
 | `controlplane/kit_check.py` | control | 200 | Acceptance test for a kit; drops failing patterns |
+| `controlplane/kit_merge.py` | control | 150 | Merge rule labels with vision labels, with physical vetoes |
+| `deckops/marks.py` | sandbox | 45 | Draw numbered box outlines on slide pictures for the vision model |
 | `tools/inspect_deck.py` | local | 30 | Shape ids per slide (debugging) |
 | `tools/compare_kits.py` | local | 55 | Automatic kit vs a reference kit |
-| `samples/`, `examples/`, `tests/` | — | — | Example templates and kits, runnable examples, 16 tests |
+| `samples/`, `examples/`, `tests/` | — | — | Example templates and kits, runnable examples, 21 tests |
 
 ---
 

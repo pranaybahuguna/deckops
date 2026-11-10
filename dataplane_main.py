@@ -6,7 +6,8 @@ production: a Kata microVM). Contract: file paths + JSON in, files + JSON out.
     probe     <in.pptx> <index.json>
     execute   <in.pptx> <ops.json> <out.pptx> <report.json>
     validate  <in.pptx> <slides|all> <outdir|-> <report.json>
-    autokit   <template.pptx> <draft_kit.json>
+    autokit   <template.pptx> [--all] <draft_kit.json>
+    marks     <template.pptx> <examples_dir> <targets.json> <report.json>
     selftest  <report.json>
 """
 import json
@@ -48,7 +49,20 @@ def main(argv):
         elif cmd == "autokit":
             import os
             from deckops.autokit import draft_kit
-            _dump(argv[2], draft_kit(argv[1], os.path.basename(argv[1])))
+            _dump(argv[-1], draft_kit(argv[1], os.path.basename(argv[1]), dedupe="--all" not in argv))
+        elif cmd == "marks":
+            # marks <deck.pptx> <examples_dir> <targets.json> <report.json>
+            # targets.json: {"<slide number>": {"ids": [...], "item_ids": [...]}}
+            import os
+            from deckops.marks import mark
+            from deckops.probe import probe
+            index = probe(argv[1])
+            out = {}
+            for n, t in json.load(open(argv[3])).items():
+                src = os.path.join(argv[2], f"slide-{int(n):02d}.png")
+                out[n] = mark(src, os.path.join(argv[2], f"slide-{int(n):02d}-marks.png"),
+                              index["slides"][int(n) - 1], index["slide_size"], t["ids"], t["item_ids"])
+            _dump(argv[4], {"ok": True, "marked": out})
         elif cmd == "validate":
             from deckops.validate import validate
             slides = None if argv[2] == "all" else {int(x) for x in argv[2].split(",")}

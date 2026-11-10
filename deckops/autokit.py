@@ -33,6 +33,8 @@ from pptx.util import Emu
 TOL = 54864                    # 0.06 inch, in EMU
 PAGE_RE = re.compile(r"^\s*\d{1,3}\s*(/\s*\d{1,3})?\s*$")
 CHART_WORD = re.compile(r"chart|graph", re.I)
+NUMBER_LIKE = re.compile(r"\d")            # a headline value has at least one digit: "42%", "3.2x", "EUR 5M"
+CHROME = {"title", "subtitle", "page", "footer"}
 
 
 class S:
@@ -222,7 +224,8 @@ def item_roles(groups):
             break
     def is_value(i, s):                  # big, short, and clearly bigger than the item's other text
         others = [t.size or 12 for j, t in rest if j != i]
-        return len(s.text) <= 10 and others and (s.size or 12) >= 1.5 * min(others)
+        return (len(s.text) <= 10 and NUMBER_LIKE.search(s.text) and others
+                and (s.size or 12) >= 1.5 * min(others))
     value = next(((i, s) for i, s in rest if is_value(i, s)), None)
     if value:
         roles["value"] = value[0]
@@ -306,22 +309,40 @@ def slide_pattern(slide, n, total, W, H):
         used.add(s)
 
     big = max((s.size or 0) for s in shapes if s.kind == "text") if any(s.kind == "text" for s in shapes) else 0
-    roles = set(p.get("items", {}).get("fields", {}))
-    if n == 1 and big >= 36:
-        name = "cover"
-    elif n == total and big >= 36:
-        name = "closing"
-    elif "table" in p:
-        name = "table"
-    elif "charts" in p:
-        name = "two_charts" if len(p["charts"]) == 2 else "chart"
-    elif "items" in p:
-        name = "steps" if "number" in roles else "stats" if "value" in roles else \
-            "panels" if p["items"]["max_columns"] == 1 else "columns" if "points" in roles else "cards"
-    else:
-        name = "text"
+    if n not in (1, total) and set(p["fields"]) <= CHROME and not any(k in p for k in ("items", "charts", "table")):
+        notes.append("only a title and footer are fillable (the rest is a picture or fixed drawing); not offered")
+        return None, notes
+    p["big_text"] = big >= 36
+    name = kind_of(p, n, total)
     p["use_for"] = USE_FOR[name](p)
     return (name, p), notes
+
+
+def kind_of(p, n, total):
+    """Name a pattern from what it holds. Used by the rules, and again after vision relabels boxes."""
+    roles = set(p.get("items", {}).get("fields", {}))
+    if n == 1 and p.get("big_text"):
+        return "cover"
+    if n == total and p.get("big_text"):
+        return "closing"
+    if "table" in p:
+        return "table"
+    if "charts" in p:
+        return "two_charts" if len(p["charts"]) == 2 else "chart"
+    if "items" in p:
+        return "steps" if "number" in roles else "stats" if "value" in roles else \
+            "panels" if p["items"]["max_columns"] == 1 else "columns" if "points" in roles else "cards"
+    return "text"
+
+
+def consistent(kind, p, n, total):
+    """Can a pattern with this content honestly be called `kind`? (vision's kind is accepted only if so)"""
+    roles = set(p.get("items", {}).get("fields", {}))
+    need = {"steps": "number" in roles, "stats": "value" in roles, "table": "table" in p,
+            "chart": len(p.get("charts", {})) == 1, "two_charts": len(p.get("charts", {})) == 2,
+            "panels": "items" in p, "columns": "items" in p, "cards": "items" in p,
+            "cover": n == 1, "closing": n == total, "text": True}
+    return need.get(kind, False)
 
 
 USE_FOR = {
@@ -380,4 +401,4 @@ def draft_kit(path: str, template_name: str, dedupe: bool = True) -> dict:
     page_format = "{n} / {total}" if any("/" in t for t in pages) else "{n}"
     return {"name": f"auto kit for {template_name}", "template": template_name, "page_format": page_format,
             "chart_style": chart_style(prs), "patterns": patterns, "notes": {str(k): v for k, v in notes.items()},
-            "draft": True}
+            "slides_total": total, "draft": True}

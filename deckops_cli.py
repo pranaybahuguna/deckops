@@ -1,7 +1,8 @@
 """Command line for the three everyday jobs.
 
     # 1. once per template: build and test its style kit (no person involved)
-    python3 deckops_cli.py kit my_template.pptx my_kit.json
+    python3 deckops_cli.py kit my_template.pptx my_kit.json                  # rules only
+    python3 deckops_cli.py kit my_template.pptx my_kit.json --llm llm.json   # rules + vision model
 
     # 2. create a new deck in that template's look
     python3 deckops_cli.py create my_kit.json content.json "brief for the deck" new_deck.pptx --llm llm.json
@@ -23,10 +24,12 @@ import sys
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 from controlplane import orchestrator  # noqa: E402
-from controlplane.planner import OpenAICompatPlanner, StubPlanner  # noqa: E402
+from controlplane.planner import OpenAICompatPlanner, RecordedVision, StubPlanner  # noqa: E402
 
 
 def planner(args):
+    if getattr(args, "labels", None):
+        return RecordedVision(args.labels)
     return OpenAICompatPlanner.from_file(args.llm) if args.llm else StubPlanner()
 
 
@@ -70,7 +73,8 @@ def main():
     k = sub.add_parser("kit", help="build and test a style kit for a template")
     k.add_argument("template")
     k.add_argument("kit_out")
-    k.add_argument("--llm", help="optional: vision-capable model for slide descriptions and checks")
+    k.add_argument("--llm", help="optional: vision-capable model that labels each box and checks test slides")
+    k.add_argument("--labels", help="optional: replay saved slide labels (label_decisions input) instead of a model")
     k.set_defaults(fn=cmd_kit)
 
     c = sub.add_parser("create", help="create a deck from a style kit")

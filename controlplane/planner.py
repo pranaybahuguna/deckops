@@ -176,6 +176,21 @@ class OpenAICompatPlanner:
             'specific to reuse>}.', json.dumps({k: pattern[k] for k in pattern if k in ("fields", "items", "charts", "table")}),
             [png])
 
+    def label_slide(self, marked_png: bytes, boxes: list[dict], rules_kind: str, slide=None) -> dict:
+        """The picture shows each box outlined with its id. -> {"kind", "use_for", "offer", "boxes": {id: role}}"""
+        from .kit_merge import KINDS, ROLES
+        return self._chat_images(
+            "You look at one slide from a corporate template. Every box a program can fill is outlined and numbered "
+            "(red = the first of a repeated item; the others repeat it). You are also given what a rule-based "
+            "program guessed for each box. Say what each box is FOR in this design, judging by how it looks, not "
+            "by its current words.\n"
+            f"Roles: {sorted(ROLES)}. 'fixed' = decoration or a label that must stay as it is.\n"
+            f"Slide kinds: {sorted(KINDS)}.\n"
+            'Return JSON {"kind": "<kind>", "use_for": "<when to use this slide, max 20 words>", '
+            '"offer": <false if too specific to reuse>, "boxes": {"<id>": "<role>"}}. '
+            "Include only boxes from the list; omit a box if unsure.",
+            json.dumps({"rules_kind": rules_kind, "boxes": boxes}, ensure_ascii=False), [marked_png])
+
     def compare_slides(self, example_png: bytes, test_png: bytes) -> dict:
         """-> {"same_design": true|false, "problems": ["..."]}"""
         return self._chat_images(
@@ -188,3 +203,19 @@ class OpenAICompatPlanner:
         """JSON file: {"base_url": "...", "model": "...", "api_key": "..."}. Keep it out of git."""
         cfg = json.load(open(path))
         return cls(cfg["base_url"], cfg["model"], cfg.get("api_key", ""))
+
+
+class RecordedVision(StubPlanner):
+    """Replays slide labels saved earlier (a vision model's answers, or ones written for a test).
+
+    File: {"<slide number>": {"kind": ..., "use_for": ..., "offer": ..., "boxes": {"<id>": "<role>"}}}
+    It labels slides only; it doesn't judge test slides (compare_slides), so that check is skipped.
+    """
+    vision = True
+    can_compare = False
+
+    def __init__(self, path_or_dict):
+        self.labels = path_or_dict if isinstance(path_or_dict, dict) else json.load(open(path_or_dict))
+
+    def label_slide(self, marked_png, boxes, rules_kind, slide=None):
+        return self.labels.get(str(slide), {})

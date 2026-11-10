@@ -229,40 +229,69 @@ def create_from_kit(root, kit_path, brief, content, planner, log=print, plan=Non
 def prepare_template(root, template_path, planner, log=print):
     """Template in, tested style kit out. No person involved.
 
-    sandbox: draft kit by rules + map + render examples  ->  control plane: optional vision labels,
-    check every id  ->  acceptance test (build + check test slides)  ->  final kit = what passed.
+    1 sandbox: rules draft a pattern for every usable slide (structure: boxes, repeats, groups)
+    2 check every id exists
+    3 sandbox: render each candidate slide, and a copy with every box outlined and numbered
+    4 control plane, optional: the vision model labels each numbered box and names the slide kind;
+      kit_merge marries the two (structure from rules, meaning from vision, physical vetoes)
+    5 keep the first slide of each kind; acceptance test (build + check test slides) on the rest
     """
     from deckops.patterns import validate_kit
     from .kit_check import acceptance_test
+    from .kit_merge import boxes_for_vision, merge
     run = Run(root, planner, log)
     log(f"run {run.id}  prepare template {os.path.basename(template_path)}")
     shutil.copy(template_path, run.p("source.pptx"))
-    _, draft = run.box("autokit", "source.pptx", "draft_kit.json")                    # 1 rules (sandbox)
+    _, draft = run.box("autokit", "source.pptx", "--all", "draft_kit.json")          # 1 rules (sandbox)
     _, index = run.box("probe", "source.pptx", "index.json")
-    log(f"  draft: {len(draft['patterns'])} patterns found: {sorted(draft['patterns'])}")
-    kit = {k: v for k, v in draft.items() if k not in ("notes",)}
+    total = draft.get("slides_total", len(index["slides"]))
+    log(f"  draft: {len(draft['patterns'])} candidate slides")
+    kit = {k: v for k, v in draft.items() if k not in ("notes", "slides_total")}
     bad = validate_kit(kit, index)                                                    # 2 ids exist?
     for name in {e.split("'")[1] for e in bad if "'" in e}:
         kit["patterns"].pop(name, None)
-    slides = sorted(p["slide"] - 1 for p in kit["patterns"].values())
-    _, rend = run.box("validate", "source.pptx", ",".join(map(str, slides)), "examples", "examples.json")
-    pngs = {name: open(run.p(f"examples/slide-{p['slide']:02d}.png"), "rb").read() for name, p in kit["patterns"].items()}
-    vision = getattr(planner, "vision", False)
-    if vision:                                                                        # 3 optional vision labels
-        for name, p in list(kit["patterns"].items()):
+    cands = kit["patterns"]
+    slides = sorted(p["slide"] - 1 for p in cands.values())
+    run.box("validate", "source.pptx", ",".join(map(str, slides)), "examples", "examples.json")   # 3 pictures
+    targets = {}
+    for p in cands.values():
+        loose = list(p["fields"].values())
+        first = [p["items"]["groups"][0][pos] for pos in p["items"]["fields"].values()] if "items" in p else []
+        targets[str(p["slide"])] = {"ids": loose + first, "item_ids": first}
+    run.save("mark_targets.json", targets)
+    run.box("marks", "source.pptx", "examples", "mark_targets.json", "marks.json")
+    png = lambda p, sfx="": open(run.p(f"examples/slide-{p['slide']:02d}{sfx}.png"), "rb").read()
+
+    vision = getattr(planner, "vision", False)                                        # 4 vision + merge
+    merged, decisions = {}, {}
+    for key, p in sorted(cands.items(), key=lambda kv: kv[1]["slide"]):
+        n = p["slide"]
+        label = None
+        if vision:
             try:
-                v = planner.describe_pattern(pngs[name], p)
-                if v.get("offer") is False:
-                    kit["patterns"].pop(name)
-                elif isinstance(v.get("use_for"), str):
-                    p["use_for"] = v["use_for"][:160]
+                label = planner.label_slide(png(p, "-marks"), boxes_for_vision(p, index["slides"][n - 1]),
+                                            key.split("@")[0], slide=n)
             except Exception as e:
-                log(f"  vision label failed for {name}: {e.__class__.__name__}; keeping rule-based label")
+                log(f"  vision failed on slide {n}: {e.__class__.__name__}; using the rules alone")
+        kind, mp, dec = merge(key, p, index["slides"][n - 1], label, n, total)
+        decisions[str(n)] = {"rules": key.split("@")[0], "final": kind, "vision_used": bool(label), **dec}
+        if kind is None:
+            continue
+        if kind in merged:                                                            # 5 first of each kind
+            decisions[str(n)]["dropped"] = f"same kind as slide {merged[kind]['slide']} ({kind})"
+            continue
+        mp.pop("big_text", None)
+        merged[kind] = mp
+    kit["patterns"] = merged
     kit["template"] = "source.pptx"
-    run.save("draft_checked_kit.json", kit)
-    final, report = acceptance_test(root, run.p("draft_checked_kit.json"), index, planner, log, pngs)   # 4 test
+    run.save("merged_kit.json", kit)
+    run.save("label_decisions.json", decisions)
+    pngs = {name: png(p) for name, p in merged.items()}
+    final, report = acceptance_test(root, run.p("merged_kit.json"), index, planner, log, pngs)
     run.save("kit.json", final)
-    run.save("kit_report.json", {"draft_notes": draft.get("notes"), "id_problems": bad, "patterns": report})
+    run.save("kit_report.json", {"draft_notes": draft.get("notes"), "id_problems": bad,
+                                 "labels": decisions, "patterns": report})
     passed = sorted(final["patterns"])
-    log(f"  kit: {len(passed)} of {len(draft['patterns'])} patterns passed: {passed}")
+    log(f"  kit: {len(passed)} of {len(merged)} patterns passed: {passed}"
+        + ("" if vision else "  (rules only: no vision model)"))
     return run, final, report

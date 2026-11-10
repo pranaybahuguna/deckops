@@ -32,7 +32,7 @@ python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt
 Then, on either:
 
 ```
-python3 -m pytest -q tests        # 16 tests, ~3 s
+python3 -m pytest -q tests        # 21 tests, ~3 s
 python3 run_demo.py               # full pipeline offline; outputs in out/
 ```
 
@@ -244,19 +244,31 @@ run, kit, report = orchestrator.prepare_template("runs", "my_template.pptx", Stu
 
 `prepare_template` runs once per template:
 
-1. **Draft (sandbox, rules only).** `deckops/autokit.py` reads every slide: title/subtitle/footer/page
+1. **Draft (sandbox, rules only)**, one candidate per usable slide. `deckops/autokit.py` reads every slide: title/subtitle/footer/page
    by position and size, repeated items (the same box shape repeated 2-12 times, with the same
    neighbours at the same offsets), chart areas (big empty boxes), tables. It names fields by what
    the box can hold (a box with room for under 1.8 lines is never "body"), and takes the chart palette
    from the slides' fills and the theme. Pictures that appear on at least half the slides (logos) are
    kept; every other picture is content and is removed when the slide is reused.
+   A headline value must be a short figure with a digit ("42%", "3.2x"); slides left with only a
+   title and footer to fill (the rest is a picture) are not offered.
 2. **Check the ids** (`validate_kit`): every id exists, item groups line up.
-3. **Optional vision labels (control plane).** The sandbox renders each example slide to PNG; the
-   control plane (never the sandbox) sends the PNG to a vision model for a better "use for" line.
+3. **Vision labels, optional (control plane).** The sandbox renders each candidate slide twice:
+   plain, and with every fillable box outlined and numbered. The control plane (never the sandbox)
+   shows the numbered picture plus the rules' guesses to a vision model, which says what each box is
+   for, what kind of slide it is, and whether it's worth offering. `controlplane/kit_merge.py`
+   marries the two: **structure from the rules** (which boxes, which repeat), **meaning from vision**
+   (names, kind, description), and **physical vetoes** on vision (a one-line box can't be "body"; a
+   number must count 1, 2, 3; a value needs a digit; long text can't be kept as decoration). Every
+   decision is saved in `label_decisions.json`: agree, vision, or vetoed and why. Then the first
+   slide of each kind is kept.
 4. **Acceptance test** (`controlplane/kit_check.py`): fills every pattern with dummy text at the
    example's length (shortest and fullest variants), builds one test deck, validates it (overflow,
    overlap, leaks), and drops any pattern that fails. With a vision model, it also compares each test
    slide with its example.
+
+`--labels saved.json` replays saved vision answers instead of calling a model (handy for tests or
+to re-run without cost).
 
 Output: `kit.json` (passing patterns only) and `kit_report.json` (why each pattern passed or failed).
 `tools/compare_kits.py template.pptx reference_kit.json` compares an automatic kit with a hand-written
